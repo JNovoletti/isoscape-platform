@@ -1,0 +1,22 @@
+# ── Web Framework ─────────────────────────────────────
+django>=5.2
+djangorestframework
+djangorestframework-simplejwt
+django-cors-headers
+
+# ── Banco de Dados ─────────────────────────────────────
+mysqlclient
+
+# ── Fila de Tarefas ────────────────────────────────────
+celery[redis]
+redis
+
+# ── Geoespacial ────────────────────────────────────────
+fiona
+geopandas
+rasterio
+rio-tiler
+
+# ── Utilitários ────────────────────────────────────────
+python-dotenv
+gunicorn
