@@ -4,6 +4,7 @@ Configuração do Celery para o projeto Isoscape.
 """
 
 import os
+from django.conf import settings
 from celery import Celery
 
 # Define o settings padrão para o Celery
@@ -15,7 +16,7 @@ app = Celery("isoscape")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 
 # Descobre tasks automaticamente em todos os apps instalados
-app.autodiscover_tasks()
+app.autodiscover_tasks(lambda: settings.INSTALLED_APPS)
 
 
 @app.task(bind=True, ignore_result=True)

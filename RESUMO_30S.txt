@@ -1,0 +1,39 @@
+⚡ RESUMO EXECUTIVO (30 segundos)
+═══════════════════════════════════════════════════════════════════════════════
+
+## O PROBLEMA
+Você cria Job e dispara tarefa, mas nada acontece:
+  • Job ID: 1 ✓
+  • Task ID: abc-123 ✓
+  • Rasters gerados: ✗
+  • Erro: nenhum
+
+## A CAUSA
+Worker Celery não está rodando ou não conectou no Redis
+
+## A SOLUÇÃO (2 linhas)
+```bash
+cd /home/jnov/isoscape-platform
+docker-compose up -d
+```
+
+Pronto! Tudo deve funcionar agora.
+
+## VERIFICAR SE FUNCIONOU
+```bash
+docker-compose logs -f worker
+# Você deve ver "Received task: ..." quando dispara gen_rasters_task.delay()
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+
+## SE AINDA NÃO FUNCIONAR
+
+Leia nesta ordem:
+1. COMECE_AQUI.txt    (2 min, solução visual)
+2. QUICK_FIX.md       (3 min, 3 passos)
+3. ./backend/quick_test.sh (1 min, teste automático)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+FIM. 🎉

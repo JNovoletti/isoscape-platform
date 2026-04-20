@@ -1,16 +1,20 @@
-# ── Celery Worker com R 4.4 ─────────────────────────────
-# Base: rocker/r-ver (R oficial) + Python por cima
+# ── Celery Worker com R 4.4 + Python 3.12 ──────────────────
 FROM rocker/r-ver:4.4
 
+# Configurações de ambiente
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# Define o caminho do ambiente virtual para que o Python o use automaticamente
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 WORKDIR /app
 
-# Instalar Python 3.12 + dependências do sistema
+# 1. Instalar dependências do sistema e Python 3.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-dev \
+    python3.12-venv \
     python3-pip \
     gcc \
     pkg-config \
@@ -21,15 +25,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libproj-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Garantir que python3.12 é o padrão
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
-    && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+# 2. Criar e ativar o ambiente virtual (venv)
+RUN python3.12 -m venv $VIRTUAL_ENV
 
-# Instalar pacotes R necessários
+# 3. Instalar pacotes R (Ncpus=4 para acelerar a compilação)
 RUN Rscript -e "install.packages(c('terra', 'sf', 'randomForest', 'ranger', 'VSURF', 'caret', 'dplyr', 'readxl', 'geodata', 'optparse', 'jsonlite'), repos='https://cloud.r-project.org', Ncpus=4)"
 
-# Instalar dependências Python
+# 4. Instalar dependências Python dentro do venv
+# Note que como o PATH foi alterado, o comando 'pip' já aponta para o venv
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
+# 5. Copiar o restante do código
 COPY . .
+
+# O comando para rodar o worker (exemplo, ajuste conforme seu projeto)
+# CMD ["celery", "-A", "seu_projeto", "worker", "--loglevel=info"]

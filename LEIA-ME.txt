@@ -1,0 +1,170 @@
+📚 ÍNDICE COMPLETO DE ARQUIVOS CRIADOS
+═══════════════════════════════════════════════════════════════════════════════
+
+## 🎯 PARA LEITURA RÁPIDA (escolha um)
+
+1. RESUMO_30S.txt ⭐⭐⭐
+   └─ Solução em 30 segundos
+   └─ docker-compose up -d
+   └─ FIM
+
+2. COMECE_AQUI.txt ⭐⭐
+   └─ Solução visual com diagrama
+   └─ 2 minutos para ler
+   └─ Inclui: teste passo a passo
+
+3. QUICK_FIX.md ⭐⭐
+   └─ Solução em 3 passos
+   └─ 3 minutos para ler
+   └─ Inclui: comandos exatos
+
+═══════════════════════════════════════════════════════════════════════════════
+
+## 📖 PARA LEITURA DETALHADA
+
+1. SOLUCAO.md (5 min)
+   └─ Resumo completo
+   └─ Inclui: problema, causa, solução, alternativas
+   └─ Referência principal
+
+2. CHECKLIST.md (10 min)
+   └─ Lista de verificação detalhada
+   └─ Cada teste com comando exato
+   └─ Use para diagnosticar
+
+3. TROUBLESHOOTING_CELERY.md (15 min)
+   └─ Guia completo de troubleshooting
+   └─ Árvore de diagnóstico
+   └─ Problemas comuns e soluções
+
+4. DEBUG_GUIDE.txt (5 min)
+   └─ Diagramas visuais
+   └─ Fluxo esperado vs. real
+   └─ Estrutura de diretórios
+
+5. README_DIAGNÓSTICO.md (5 min)
+   └─ Resumo do diagnóstico
+   └─ Tabela de status
+   └─ Resumo do problema
+
+6. INDICE.md (2 min)
+   └─ Índice com descrições
+   └─ Tempo estimado para cada arquivo
+   └─ Fluxo recomendado
+
+═══════════════════════════════════════════════════════════════════════════════
+
+## 🧪 PARA TESTES AUTOMÁTICOS
+
+Scripts em /backend/:
+
+1. quick_test.sh (30 seg)
+   └─ Verifica toda infraestrutura
+   └─ Checa: Docker, Redis, Rscript, Shapefile, Logs
+   └─ Uso: ./backend/quick_test.sh
+   └─ Retorna: PASSA/FALHA para cada item
+
+2. test_gen_rasters_local.py (5-10 min)
+   └─ Executa gen_rasters_task SINCRONO
+   └─ Sem Celery (DEBUG)
+   └─ Mostra EXATAMENTE qual é o erro
+   └─ Uso: python ./backend/test_gen_rasters_local.py
+
+3. diagnose_celery.sh (30 seg)
+   └─ Diagnóstico específico Celery/Redis
+   └─ Verifica: Redis, Worker, comunicação
+   └─ Uso: ./backend/diagnose_celery.sh
+
+═══════════════════════════════════════════════════════════════════════════════
+
+## 🗂️ MAPA VISUAL
+
+/home/jnov/isoscape-platform/
+│
+├── 📄 RESUMO_30S.txt              ← ⭐⭐⭐ COMECE POR AQUI
+├── 📄 COMECE_AQUI.txt             ← ⭐⭐ Visão geral rápida
+├── 📄 QUICK_FIX.md                ← ⭐⭐ Solução rápida
+│
+├── 📄 SOLUCAO.md                  ← Principal (leitura detalhada)
+├── 📄 CHECKLIST.md                ← Verificação passo a passo
+├── 📄 TROUBLESHOOTING_CELERY.md   ← Guia completo
+├── 📄 DEBUG_GUIDE.txt             ← Diagramas
+├── 📄 README_DIAGNÓSTICO.md       ← Resumo do problema
+├── 📄 INDICE.md                   ← Este índice
+│
+└── backend/
+    ├── 🧪 quick_test.sh           ← Teste automático (30 seg)
+    ├── 🧪 test_gen_rasters_local.py ← Teste DEBUG (5-10 min)
+    ├── 🧪 diagnose_celery.sh      ← Diagnóstico Celery (30 seg)
+    └── test_celery_debug.py       ← Teste alternativo (não recomendado)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+## 🎯 FLUXO RECOMENDADO POR TIPO DE USUÁRIO
+
+### Se tem 30 segundos:
+  1. Leia: RESUMO_30S.txt
+  2. Execute: docker-compose up -d
+  3. FIM
+
+### Se tem 5 minutos:
+  1. Leia: QUICK_FIX.md
+  2. Execute: comandos do QUICK_FIX.md
+  3. Teste: siga instruções
+
+### Se tem 15 minutos:
+  1. Leia: COMECE_AQUI.txt
+  2. Execute: docker-compose up -d
+  3. Execute: ./backend/quick_test.sh
+  4. Teste: conforme instruções
+  5. Se falhar: leia SOLUCAO.md
+
+### Se tem 30+ minutos (diagnóstico completo):
+  1. Leia: SOLUCAO.md
+  2. Execute: CHECKLIST.md (todos os testes)
+  3. Se falhar: leia TROUBLESHOOTING_CELERY.md
+  4. Use: DEBUG_GUIDE.txt para entender o fluxo
+
+═══════════════════════════════════════════════════════════════════════════════
+
+## 📊 TEMPO ESTIMADO POR TAREFA
+
+| Arquivo/Script | Tipo | Tempo | Uso |
+|---|---|---|---|
+| RESUMO_30S.txt | Leitura | 30s | Solução imediata |
+| COMECE_AQUI.txt | Leitura | 2 min | Visão geral |
+| QUICK_FIX.md | Leitura | 3 min | Solução rápida |
+| SOLUCAO.md | Leitura | 5 min | Principal |
+| DEBUG_GUIDE.txt | Leitura | 5 min | Diagramas |
+| README_DIAGNÓSTICO.md | Leitura | 5 min | Resumo |
+| CHECKLIST.md | Leitura | 10 min | Verificação |
+| TROUBLESHOOTING_CELERY.md | Leitura | 15 min | Troubleshooting |
+| quick_test.sh | Script | 30s | Teste automático |
+| diagnose_celery.sh | Script | 30s | Diagnóstico |
+| test_gen_rasters_local.py | Script | 5-10 min | Teste debug |
+
+**Total de leitura recomendada: 15-20 minutos**
+**Total para resolver: 5-30 minutos (depende do problema)**
+
+═══════════════════════════════════════════════════════════════════════════════
+
+## 🚀 PRÓXIMA AÇÃO
+
+Escolha uma opção:
+
+A) ⚡ Solução rápida (30 sec):
+   → Abra: RESUMO_30S.txt
+   → Execute: docker-compose up -d
+
+B) 📖 Entender o problema (5 min):
+   → Abra: QUICK_FIX.md
+   → Siga os passos
+
+C) 🔬 Diagnóstico completo (30 min):
+   → Abra: SOLUCAO.md
+   → Execute: CHECKLIST.md
+   → Use: scripts de teste
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Dúvidas? Comece por RESUMO_30S.txt ou QUICK_FIX.md!
