@@ -25,7 +25,7 @@ suppressPackageStartupMessages({
   library(randomForest)
   library(ranger)
   library(VSURF)
-  library(caret)
+  library(rsample)
   library(dplyr)
   library(readxl)
   library(jsonlite)
@@ -210,9 +210,9 @@ formula_rf <- as.formula(paste("response ~", paste(pred_vars, collapse = "+")))
 # ── 6. Random Forest ─────────────────────────────────────────────────────────
 log_msg("[→] Ajustando Random Forest (ntree = 500)...")
 
-partition <- createDataPartition(df_model$response, p = 0.8, list = FALSE)
-treino    <- df_model[partition, ]
-teste     <- df_model[-partition, ]
+split  <- initial_split(df_model, prop = 0.8, strata = "response")
+treino <- training(split)
+teste  <- testing(split)
 
 rf_mod    <- randomForest(formula_rf, data = treino, ntree = 500)
 pred_test <- predict(rf_mod, teste)
