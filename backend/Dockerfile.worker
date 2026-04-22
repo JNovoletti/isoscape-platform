@@ -18,18 +18,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     gcc \
     pkg-config \
-    default-libmysqlclient-dev \
     libgdal-dev \
     gdal-bin \
     libgeos-dev \
     libproj-dev \
+    libudunits2-dev \
+    libudunits2-0 \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    libxml2-dev \
+    libblas-dev \
+    liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Criar e ativar o ambiente virtual (venv)
 RUN python3.12 -m venv $VIRTUAL_ENV
 
 # 3. Instalar pacotes R (Ncpus=4 para acelerar a compilação)
-RUN Rscript -e "install.packages(c('terra', 'sf', 'randomForest', 'ranger', 'VSURF', 'caret', 'dplyr', 'readxl', 'geodata', 'optparse', 'jsonlite'), repos='https://cloud.r-project.org', Ncpus=4)"
+RUN Rscript -e "install.packages('pak', repos='https://cloud.r-project.org')" && \
+    Rscript -e "pak::pkg_install(c( \
+      'terra','sf','randomForest','ranger','VSURF','rsample', \
+      'dplyr','readxl','geodata','optparse','jsonlite' \
+    ))"
 
 # 4. Instalar dependências Python dentro do venv
 # Note que como o PATH foi alterado, o comando 'pip' já aponta para o venv
