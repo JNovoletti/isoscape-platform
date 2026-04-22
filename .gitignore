@@ -1,3 +1,2 @@
-./data/worldclim_cache/*
-./data/rasters/*
-
+data/worldclim_cache/
+data/rasters/
