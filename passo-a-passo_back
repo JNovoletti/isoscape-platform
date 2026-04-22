@@ -1,0 +1,58 @@
+Testar envio de tasks e funcionamento no R.
+
+1 - docker compose up -d db redis backend worker
+
+2 - docker compose exec worker python manage.py makemigrations
+3 - docker compose exec worker python manage.py migrate
+4 - docker compose exec worker python manage.py shell
+
+NO shell:
+
+from django.contrib.auth import get_user_model
+from apps.projects.models import Project
+from apps.shapefiles.models import StudyArea
+from apps.jobs.models import Job
+
+User = get_user_model()
+user = User.objects.create_superuser("admin", "admin@test.com", "admin123")
+
+project = Project.objects.create(owner=user, name="Teste", isotope_type="d13C")
+print("Project:", project)
+
+sa = StudyArea.objects.create(
+    name="amazonia_legal",
+    file_path="/data/shapefiles/amazonia_legal.shp",
+    is_preset=True,
+)
+print("StudyArea:", sa)
+
+job = Job.objects.create(
+    project=project,
+    created_by=user,
+    job_type=Job.JobType.GEN_RASTERS,
+    status=Job.Status.PENDING,
+    config={
+        "study_area_id":   sa.id,
+        "study_area_name": sa.name,
+        "shapefile_path":  sa.file_path,
+        "variables":       ["tavg"],
+        "resolution":      "10",
+        "skip_existing":   True,
+    }
+)
+print("Job criado:", job, "| status:", job.status)
+
+from apps.jobs.tasks import gen_rasters_task
+gen_rasters_task.delay(job.id)
+
+Ver logs no worker:
+docker compose logs -f worker
+
+Se concluiu:
+job.refresh_from_db()
+print(job.status)
+
+Teste script isoscape:
+
+docker compose exec worker Rscript r_scripts/run_isoscape.R --job-id test --dataset-path /data/datasets/madeiras.csv --raster-dir /data/raster s/1/amazonia_legal --output-dir /data/isoscapes/test --response-col d13C_wood --lat-col latitude --lon-col longitude --uncertainty quantile_rf --resolution 10
+
