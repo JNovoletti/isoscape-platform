@@ -95,11 +95,7 @@ services:
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
     volumes:
       - ./backend:/app
-      - data_rasters:/data/rasters
-      - data_shapefiles:/data/shapefiles
-      - data_isoscapes:/data/isoscapes
-      - data_worldclim:/data/worldclim_cache
-      - data_datasets:/data/datasets
+      - ./data:/data
     depends_on:
       db:
         condition: service_healthy
