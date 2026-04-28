@@ -130,6 +130,15 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "America/Sao_Paulo"
 
+# ── Script Execution Engine ────────────────────────────
+# Escolhe qual engine usar para executar scripts de processamento:
+# - 'python': executa versões Python dos scripts (padrão)
+# - 'r': executa versões R originais
+EXECUTION_ENGINE = os.environ.get("EXECUTION_ENGINE", "python")
+
+# Se True, tenta fallback para R se Python falhar
+SCRIPT_ENGINE_FALLBACK = os.environ.get("SCRIPT_ENGINE_FALLBACK", "true").lower() == "true"
+
 # ── Internacionalização ────────────────────────────────
 LANGUAGE_CODE = "pt-br"
 TIME_ZONE = "America/Sao_Paulo"

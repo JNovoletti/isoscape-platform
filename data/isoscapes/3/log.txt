@@ -1,0 +1,10 @@
+[14:26:26] [→] Job iniciado: 3
+[14:26:26] [→] Dataset: /data/datasets/madeiras.csv
+[14:26:26] [→] Rasters: /data/rasters/1/amazonia_legal
+[14:26:26] [→] Resolução: 10 arc-min
+[14:26:26] [→] Incerteza: quantile_rf
+[14:26:26] [→] Lendo dataset...
+[14:26:26] [✓] Dataset lido: 2377 linhas
+[14:26:26] [→] Criando objeto espacial...
+[14:26:26] [✓] Objeto sf criado (CRS SIRGAS 2000 / EPSG:4674)
+[14:26:26] [→] Carregando rasters...

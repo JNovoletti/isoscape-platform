@@ -1,14 +1,11 @@
-# from celery import shared_task
-
-# @shared_task
-# def hello_task(name: str) -> str:
-#     return f"Olá, {name}! Celery funcionando."
 # apps/jobs/tasks.py
 
 import subprocess
 import json
+import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 from celery import shared_task
 from django.conf import settings
@@ -21,8 +18,107 @@ def _update_job(job, **fields):
     job.save(update_fields=list(fields.keys()))
 
 
-def _run_rscript(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run_script(cmd: list[str]) -> subprocess.CompletedProcess:
+    """Run a script (R or Python) and return result."""
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _get_execution_command(script_type: str, job_id: int, job_config: dict,
+                          output_dir: Path) -> Optional[list[str]]:
+    """
+    Build command to execute script based on EXECUTION_ENGINE setting.
+    
+    Args:
+        script_type: "gen_rasters" or "run_isoscape"
+        job_id: Job ID
+        job_config: Job configuration dict
+        output_dir: Output directory path
+        
+    Returns:
+        Command list for subprocess.run(), or None if engine is 'r' (use old code)
+    """
+    engine = settings.EXECUTION_ENGINE.lower()
+    
+    if engine == "python":
+        # Build Python command
+        base_dir = Path(settings.BASE_DIR) / "python_scripts"
+        
+        if script_type == "gen_rasters":
+            cmd = [
+                sys.executable,
+                str(base_dir / "gen_rasters.py"),
+                "--job-id", str(job_id),
+                "--shapefile", job_config["shapefile_path"],
+                "--output-dir", str(output_dir),
+                "--worldclim-dir", str(settings.DATA_WORLDCLIM_DIR),
+                "--variables", ",".join(job_config["variables"]),
+                "--resolution", str(job_config.get("resolution", "5")),
+                "--skip-existing", str(job_config.get("skip_existing", True)).lower(),
+            ]
+            
+            # Add bio-layers if specified
+            if "bio" in job_config.get("variables", []) and job_config.get("bio_layers"):
+                cmd += ["--bio-layers", ",".join(job_config["bio_layers"])]
+        
+        elif script_type == "run_isoscape":
+            cmd = [
+                sys.executable,
+                str(base_dir / "run_isoscape.py"),
+                "--job-id", str(job_id),
+                "--dataset-path", job_config["dataset_path"],
+                "--raster-dir", job_config["raster_dir"],
+                "--output-dir", str(output_dir),
+                "--response-col", job_config["response_col"],
+                "--lat-col", job_config.get("lat_col", "latitude"),
+                "--lon-col", job_config.get("lon_col", "longitude"),
+                "--uncertainty", job_config.get("uncertainty", "quantile_rf"),
+                "--resolution", str(job_config.get("resolution", "5")),
+            ]
+        
+        else:
+            return None
+        
+        return cmd
+    
+    elif engine == "r":
+        return None  # Return None to indicate R engine (use original R script logic)
+    
+    else:
+        raise ValueError(f"Invalid EXECUTION_ENGINE: {engine}")
+
+
+def _run_with_fallback(job, script_type: str, python_cmd: Optional[list[str]],
+                      r_cmd: list[str], metrics_path: Path) -> tuple[subprocess.CompletedProcess, str]:
+    """
+    Execute script, with fallback to R if Python fails (if enabled).
+    
+    Args:
+        job: Job instance
+        script_type: "gen_rasters" or "run_isoscape"
+        python_cmd: Python command (None if using R)
+        r_cmd: R command (fallback)
+        metrics_path: Path to metrics.json
+        
+    Returns:
+        Tuple of (CompletedProcess result, engine_used)
+    """
+    engine_used = "r"  # default
+    proc = None
+    
+    # Try Python engine if configured
+    if python_cmd is not None:
+        engine_used = "python"
+        proc = _run_script(python_cmd)
+        
+        # If Python failed and fallback enabled, try R
+        if proc.returncode != 0 and settings.SCRIPT_ENGINE_FALLBACK:
+            engine_used = "r (fallback)"
+            proc = _run_script(r_cmd)
+    else:
+        # R engine
+        proc = _run_script(r_cmd)
+    
+    return proc, engine_used
 
 
 # =============================================================================
@@ -41,7 +137,8 @@ def gen_rasters_task(self, job_id: int):
     output_dir = settings.DATA_RASTERS_DIR / str(job.project_id) / cfg["study_area_name"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
+    # Build R command (fallback)
+    r_cmd = [
         "Rscript",
         str(Path(settings.BASE_DIR) / "r_scripts" / "gen_rasters.R"),
         "--job-id",        str(job_id),
@@ -53,13 +150,20 @@ def gen_rasters_task(self, job_id: int):
         "--skip-existing", str(cfg.get("skip_existing", True)),
     ]
 
-    # Inclui bio-layers só se o usuário selecionou a variável "bio"
     if "bio" in cfg.get("variables", []) and cfg.get("bio_layers"):
-        cmd += ["--bio-layers", ",".join(cfg["bio_layers"])]
+        r_cmd += ["--bio-layers", ",".join(cfg["bio_layers"])]
+
+    # Build Python command (primary) or None if using R
+    python_cmd = _get_execution_command("gen_rasters", job_id, cfg, output_dir)
 
     try:
-        _update_job(job, progress_step="1/2 — Rodando gen_rasters.R")
-        proc = _run_rscript(cmd)
+        _update_job(job, progress_step="1/2 — Running gen_rasters")
+        
+        # Execute with fallback
+        proc, engine_used = _run_with_fallback(
+            job, "gen_rasters", python_cmd, r_cmd,
+            output_dir / "metrics.json"
+        )
 
         job.log = proc.stdout
         if proc.returncode != 0:
@@ -72,7 +176,7 @@ def gen_rasters_task(self, job_id: int):
             )
             return
 
-        # Ler metrics.json para registrar os RasterLayers no banco
+        # Read metrics.json to register RasterLayers
         metrics_path = output_dir / "metrics.json"
         metrics      = json.loads(metrics_path.read_text())
 
@@ -83,9 +187,7 @@ def gen_rasters_task(self, job_id: int):
         resolution = str(cfg.get("resolution", "5"))
 
         for file_path in metrics["generated_files"]:
-            # Extrair nome da variável do nome do arquivo
-            # Padrão: {prefix}_{res}arc_{var}_mean.tif  ou  {prefix}_{res}arc_bio{N}.tif
-            stem = Path(file_path).stem                      # ex: amazonia_5arc_tavg_mean
+            stem = Path(file_path).stem
             parts = stem.split(f"_{resolution}arc_", 1)
             variable = parts[1].replace("_mean", "") if len(parts) == 2 else stem
 
@@ -100,7 +202,7 @@ def gen_rasters_task(self, job_id: int):
             job,
             status=Job.Status.COMPLETED,
             log=proc.stdout,
-            progress_step="2/2 — Concluído",
+            progress_step="2/2 — Complete",
             finished_at=datetime.now(),
         )
 
@@ -130,7 +232,8 @@ def run_isoscape_task(self, job_id: int):
     output_dir = settings.DATA_ISOSCAPES_DIR / str(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
+    # Build R command (fallback)
+    r_cmd = [
         "Rscript",
         str(Path(settings.BASE_DIR) / "r_scripts" / "run_isoscape.R"),
         "--job-id",       str(job_id),
@@ -138,15 +241,23 @@ def run_isoscape_task(self, job_id: int):
         "--raster-dir",   cfg["raster_dir"],
         "--output-dir",   str(output_dir),
         "--response-col", cfg["response_col"],
-        "--lat-col",      cfg["lat_col"],
-        "--lon-col",      cfg["lon_col"],
+        "--lat-col",      cfg.get("lat_col", "latitude"),
+        "--lon-col",      cfg.get("lon_col", "longitude"),
         "--uncertainty",  cfg.get("uncertainty", "quantile_rf"),
         "--resolution",   str(cfg.get("resolution", "5")),
     ]
 
+    # Build Python command (primary) or None if using R
+    python_cmd = _get_execution_command("run_isoscape", job_id, cfg, output_dir)
+
     try:
-        _update_job(job, progress_step="1/7 — Iniciando run_isoscape.R")
-        proc = _run_rscript(cmd)
+        _update_job(job, progress_step="1/7 — Initiating run_isoscape")
+        
+        # Execute with fallback
+        proc, engine_used = _run_with_fallback(
+            job, "run_isoscape", python_cmd, r_cmd,
+            output_dir / "metrics.json"
+        )
 
         job.log = proc.stdout
         if proc.returncode != 0:
@@ -171,9 +282,9 @@ def run_isoscape_task(self, job_id: int):
             mse=metrics["MSE"],
             r_squared=metrics["R2"],
             selected_vars={
-                "threshold_vars": metrics["threshold_vars"],
-                "interp_vars":    metrics["interp_vars"],
-                "pred_vars":      metrics["pred_vars"],
+                "threshold_vars": metrics.get("threshold_vars", []),
+                "interp_vars":    metrics.get("interp_vars", []),
+                "pred_vars":      metrics.get("pred_vars", []),
             },
             model_type=cfg.get("model_type", "random_forest"),
             uncertainty_method=cfg.get("uncertainty", "quantile_rf"),
@@ -183,7 +294,7 @@ def run_isoscape_task(self, job_id: int):
             job,
             status=Job.Status.COMPLETED,
             log=proc.stdout,
-            progress_step="7/7 — Concluído",
+            progress_step="7/7 — Complete",
             finished_at=datetime.now(),
         )
 
@@ -195,9 +306,6 @@ def run_isoscape_task(self, job_id: int):
             finished_at=datetime.now(),
         )
         raise
-
-
-# =============================================================================
 # Helper — verificar se já existem rasters para uma StudyArea + resolução
 # Usado pela view antes de decidir se dispara gen_rasters_task
 # =============================================================================
