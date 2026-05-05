@@ -1,18 +1,53 @@
-[14:36:03] [→] Job iniciado: 4
-[14:36:03] [→] Dataset: /data/datasets/madeiras.csv
-[14:36:03] [→] Rasters: /data/rasters/2/amazonia_legal
-[14:36:03] [→] Resolução: 10 arc-min
-[14:36:03] [→] Incerteza: quantile_rf
-[14:36:03] [→] Lendo dataset...
-[14:36:03] [✓] Dataset lido: 2377 linhas
-[14:36:03] [→] Criando objeto espacial...
-[14:36:03] [✓] Objeto sf criado (CRS SIRGAS 2000 / EPSG:4674)
-[14:36:03] [→] Carregando rasters...
-[14:36:03] [✓] Rasters carregados: 1 camadas
-[14:36:03] [→] Extraindo valores dos rasters nos pontos amostrais...
-[14:36:03] [✓] Extração concluída: 2069 linhas, 1 preditoras
-[14:36:03] [→] Executando VSURF para seleção de variáveis...
-[14:36:03]     (esta etapa pode demorar vários minutos)
-[14:36:23] [!] VSURF falhou: object 'min.pred' not found — usando todas as variáveis
-[14:36:23] [✓] VSURF concluído. Variáveis preditoras: extracted[, -1]
-[14:36:23] [→] Ajustando Random Forest (ntree = 500)...
+[16:08:53] INFO — [→] Job iniciado: 4
+[16:08:53] INFO — [→] Dataset: /data/datasets/madeiras.csv
+[16:08:53] INFO — [→] Rasters: /data/rasters/1/amazonia_legal
+[16:08:53] INFO — [→] Resolução: 10.0 arc-min
+[16:08:53] INFO — [→] Incerteza: quantile_rf
+[16:08:53] INFO — [→] Lendo dataset...
+[16:08:53] INFO — [✓] Dataset lido: 2377 linhas
+[16:08:53] INFO — [→] Carregando rasters...
+[16:08:53] INFO — [→] Arquivos .tif encontrados: 1
+[16:08:53] INFO — [→] Primeiro raster: amazonia_legal_10arc_tavg_mean.tif
+[16:08:53] INFO — [✓] Rasters carregados: 1 camadas
+[16:08:53] INFO — [→] Extraindo valores dos rasters nos pontos amostrais...
+[16:08:53] INFO — [✓] Extração concluída: 2069 linhas, 1 preditoras
+[16:08:53] INFO — [→] Executando seleção de variáveis (RFE equiv. VSURF)...
+[16:08:53] INFO —     (esta etapa pode demorar alguns minutos)
+[16:08:53] INFO — [✓] Variáveis selecionadas (1): amazonia_legal_10arc_tavg_mean
+[16:08:53] INFO — [→] Ajustando Random Forest (ntree=500)...
+[16:08:54] INFO — [✓] RF ajustado. MSE = 1.7083 | R² = 0.3424
+[16:08:54] INFO — [→] Gerando isoscape (predição espacial)...
+[16:08:54] INFO — [✓] Isoscape gerado
+[16:08:54] INFO — [→] Calculando incerteza via quantile_rf...
+[16:08:54] INFO — [→] Treinando GBR quantile 0.16...
+[16:08:54] INFO — [→] Treinando GBR quantile 0.84...
+[16:08:55] ERROR — [!] Erro fatal: boolean index did not match indexed array along axis 0; size of axis is 27020 but size of corresponding boolean axis is 140
+[16:08:55] ERROR — Traceback (most recent call last):
+  File "/app/python_scripts/run_isoscape.py", line 486, in main
+    unc_2d = uncertainty_quantile_rf(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/python_scripts/run_isoscape.py", line 263, in uncertainty_quantile_rf
+    lo = gbr_lo.predict(X_raster[valid_mask]).astype(np.float32)
+                        ~~~~~~~~^^^^^^^^^^^^
+IndexError: boolean index did not match indexed array along axis 0; size of axis is 27020 but size of corresponding boolean axis is 140
+
+[16:08:58] [→] Job iniciado: 4
+[16:08:58] [→] Dataset: /data/datasets/madeiras.csv
+[16:08:58] [→] Rasters: /data/rasters/1/amazonia_legal
+[16:08:58] [→] Resolução: 10 arc-min
+[16:08:58] [→] Incerteza: quantile_rf
+[16:08:58] [→] Lendo dataset...
+[16:08:58] [✓] Dataset lido: 2377 linhas
+[16:08:58] [→] Criando objeto espacial...
+[16:08:58] [✓] Objeto sf criado (CRS SIRGAS 2000 / EPSG:4674)
+[16:08:58] [→] Carregando rasters...
+[16:08:58] [→] Arquivos .tif encontrados: 1
+[16:08:58] [→] Primeiro raster: amazonia_legal_10arc_tavg_mean.tif
+[16:08:58] [✓] Rasters carregados: 1 camadas
+[16:08:58] [→] Extraindo valores dos rasters nos pontos amostrais...
+[16:08:58] [✓] Extração concluída: 2069 linhas, 1 preditoras
+[16:08:58] [→] Executando VSURF para seleção de variáveis...
+[16:08:58]     (esta etapa pode demorar vários minutos)
+[16:09:17] [!] VSURF falhou: object 'min.pred' not found — usando todas as variáveis
+[16:09:17] [✓] VSURF concluído. Variáveis preditoras: extracted[, -1]
+[16:09:17] [→] Ajustando Random Forest (ntree = 500)...

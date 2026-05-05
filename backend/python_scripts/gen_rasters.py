@@ -2,377 +2,505 @@
 """
 backend/python_scripts/gen_rasters.py
 
-Python equivalent of gen_rasters.R
-Downloads WorldClim climate data, clips to study area shapefile, and generates TIFs.
+Equivalente Python do gen_rasters.R.
+Baixa dados WorldClim (arquivos .zip), extrai, recorta pela área de estudo e salva .tif.
 
-Usage:
-    python gen_rasters.py \
-      --job-id abc-123 \
-      --shapefile /data/shapefiles/amazonia_legal.shp \
-      --output-dir /data/rasters/project1/ \
-      --worldclim-dir /data/worldclim_cache/ \
-      --variables tavg,tmax,tmin,prec \
-      --bio-layers bio1,bio2,bio3 \
-      --resolution 5 \
+WorldClim v2.1 distribui arquivos .zip com rasters mensais ou bioclim:
+  https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_{res}m_{var}.zip
+
+Uso:
+    python gen_rasters.py \\
+      --job-id abc-123 \\
+      --shapefile /data/shapefiles/amazonia_legal.shp \\
+      --output-dir /data/rasters/project1/ \\
+      --worldclim-dir /data/worldclim_cache/ \\
+      --variables tavg,tmax,tmin,prec \\
+      --bio-layers bio1,bio2,bio3 \\
+      --resolution 5 \\
       --skip-existing true
 """
 
 import argparse
+import json
+import re
 import sys
+import zipfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import logging
+import urllib.request
+import urllib.error
 
 import numpy as np
-import rioxarray
-import xarray as xr
-from scipy.ndimage import zoom
+import geopandas as gpd
+import rasterio
+from rasterio.mask import mask as rio_mask
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.crs import CRS
+from shapely.geometry import mapping
 
-# Add parent dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from python_scripts.utils import (
-    setup_logging, log_msg, MetricsCollector, load_shapefile,
-    ensure_output_dir, get_file_prefix, parse_csv_list
+    setup_logging, log_msg, MetricsCollector,
+    load_shapefile, ensure_output_dir, parse_csv_list, get_file_prefix
 )
 
+# ── WorldClim v2.1 URLs ────────────────────────────────────────────────────────
+# Resolução → sufixo usado na URL (2.5m, 5m, 10m)
+RESOLUTION_MAP = {
+    2.5: "2.5m",
+    5:   "5m",
+    10:  "10m",
+}
+
+WORLDCLIM_BASE = "https://geodata.ucdavis.edu/climate/worldclim/2_1/base"
+
+# Variáveis com múltiplas camadas mensais (12 arquivos dentro do .zip)
+MONTHLY_VARS = {"tavg", "tmax", "tmin", "prec", "srad", "vapr", "wind"}
+# Bioclim: um único arquivo com 19 bandas
+BIO_VAR = "bio"
+
+TARGET_CRS = "EPSG:4674"  # SIRGAS 2000
+
 
 # =============================================================================
-# WorldClim Data Access
+# Download com progresso
 # =============================================================================
 
-def download_worldclim_bio(resolution: float, cache_dir: Path) -> xr.Dataset:
+def _report_hook(count, block_size, total_size):
+    """Hook de progresso para urllib.request.urlretrieve."""
+    if total_size > 0:
+        pct = int(count * block_size * 100 / total_size)
+        pct = min(pct, 100)
+        if pct % 10 == 0:
+            pass  # Evita spam; o caller usa log_msg
+
+
+def download_file(url: str, dest: Path, logger: logging.Logger) -> bool:
     """
-    Download WorldClim bioclimatic variables.
-    
-    Args:
-        resolution: Resolution in arc-minutes (2.5, 5, or 10)
-        cache_dir: Directory to cache downloaded files
-        
-    Returns:
-        xarray Dataset with bio layers (bio1-bio19)
+    Baixa url para dest. Retorna True em sucesso.
+    Usa urllib (stdlib) — sem dependências extras.
     """
-    # Use COG (Cloud-Optimized GeoTIFF) URLs for remote access
-    # This avoids large local downloads
-    base_url = f"https://www.worldclim.org/version2_1"
-    
-    # Try using earthpy for downloading
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        log_msg(logger, f"  [cache] Arquivo já existe: {dest.name}", "INFO")
+        return True
+
+    log_msg(logger, f"  [↓] {url}", "INFO")
     try:
-        import earthpy.io as eio
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Download via earthpy (which uses GDAL/urllib under the hood)
-        # For simplicity, we'll use rioxarray to open remote COGs
-        bio_url = f"{base_url}/bio/wc2.1_{int(resolution)}m/wc2.1_{int(resolution)}m_bio.tif"
-        
-        # Use rioxarray to open remote COG
-        ds = rioxarray.open_rasterio(bio_url)
-        return ds
+        urllib.request.urlretrieve(url, dest)
+        size_mb = dest.stat().st_size / 1024 / 1024
+        log_msg(logger, f"  [✓] Download concluído: {dest.name} ({size_mb:.1f} MB)", "INFO")
+        return True
+    except urllib.error.URLError as e:
+        log_msg(logger, f"  [!] Falha no download: {e}", "ERROR")
+        if dest.exists():
+            dest.unlink()
+        return False
     except Exception as e:
-        raise Exception(f"Failed to download WorldClim bio data: {e}")
-
-
-def download_worldclim_variable(variable: str, resolution: float, cache_dir: Path) -> xr.Dataset:
-    """
-    Download a single WorldClim variable.
-    
-    Variables supported: tavg, tmax, tmin, prec, srad, vapr, wind, elev
-    
-    Args:
-        variable: Climate variable name
-        resolution: Resolution in arc-minutes (2.5, 5, or 10)
-        cache_dir: Directory to cache downloaded files
-        
-    Returns:
-        xarray Dataset
-    """
-    # WorldClim COG URLs
-    base_url = f"https://www.worldclim.org/version2_1/data"
-    
-    try:
-        # Construct URL for monthly data (average)
-        url = f"{base_url}/monthly/wc2.1_{int(resolution)}m_{variable}.tif"
-        
-        # Use rioxarray to open remote COG
-        ds = rioxarray.open_rasterio(url)
-        return ds
-    except Exception as e:
-        # Fallback: try different URL pattern
-        try:
-            url = f"https://worldclim.blob.core.windows.net/v2/2.1/wc2.1_{int(resolution)}m_{variable}.tif"
-            ds = rioxarray.open_rasterio(url)
-            return ds
-        except Exception as e2:
-            raise Exception(f"Failed to download WorldClim variable '{variable}': {e2}")
-
-
-def clip_and_project_raster(raster: xr.Dataset, shapefile_gdf, target_crs: str = "EPSG:4674"):
-    """
-    Clip raster to shapefile bounds and project to target CRS.
-    
-    Args:
-        raster: xarray Dataset or DataArray with spatial data
-        shapefile_gdf: GeoDataFrame with study area geometry
-        target_crs: Target CRS (default: SIRGAS 2000)
-        
-    Returns:
-        Clipped and projected xarray Dataset
-    """
-    # Reproject if needed
-    if raster.rio.crs is None or str(raster.rio.crs) != target_crs:
-        raster = raster.rio.reproject(target_crs)
-    
-    # Get bounds from shapefile
-    bounds = shapefile_gdf.total_bounds  # (minx, miny, maxx, maxy)
-    
-    # Clip to bounds
-    clipped = raster.rio.clip_box(
-        minx=bounds[0], miny=bounds[1],
-        maxx=bounds[2], maxy=bounds[3]
-    )
-    
-    # Clip to actual geometry (more precise)
-    clipped = clipped.rio.clip(shapefile_gdf.geometry, from_disk=True, crs=target_crs)
-    
-    return clipped
-
-
-def save_raster_to_tif(data: xr.DataArray, output_path: Path, overwrite: bool = True):
-    """
-    Save xarray DataArray to GeoTIFF.
-    
-    Args:
-        data: xarray DataArray with spatial coordinates
-        output_path: Path to save .tif file
-        overwrite: Whether to overwrite existing file
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    if output_path.exists() and not overwrite:
-        return
-    
-    data.rio.to_raster(output_path)
+        log_msg(logger, f"  [!] Erro inesperado no download: {e}", "ERROR")
+        if dest.exists():
+            dest.unlink()
+        return False
 
 
 # =============================================================================
-# Main Processing
+# WorldClim: encontrar arquivos dentro do .zip
 # =============================================================================
 
-def process_bio_layers(shapefile_gdf, variables: List[str], bio_layers: List[str],
-                       resolution: float, output_dir: Path, metrics: MetricsCollector,
-                       logger: logging.Logger, skip_existing: bool = True) -> tuple[List[str], List[str]]:
-    """
-    Process bioclimatic layers (bio1-bio19).
-    
-    Args:
-        shapefile_gdf: Study area geometry
-        variables: List of requested variables (should contain "bio")
-        bio_layers: List of bio layers to keep (e.g., ["bio1", "bio2"])
-        resolution: Resolution in arc-minutes
-        output_dir: Output directory
-        metrics: MetricsCollector instance
-        logger: Logger instance
-        skip_existing: Skip existing files
-        
-    Returns:
-        Tuple of (generated_files, skipped_files)
-    """
-    if "bio" not in variables:
-        return [], []
-    
-    generated = []
-    skipped = []
-    
-    prefix = get_file_prefix(shapefile_gdf.name if hasattr(shapefile_gdf, 'name') else "study_area")
-    res_tag = f"{int(resolution)}arc"
-    
-    log_msg(logger, "[→] Downloading: bio (WorldClim bioclim)", "INFO")
-    
+def list_tifs_in_zip(zip_path: Path) -> List[str]:
+    """Lista todos os .tif dentro do .zip."""
+    with zipfile.ZipFile(zip_path, "r") as z:
+        return [n for n in z.namelist() if n.lower().endswith(".tif")]
+
+
+def extract_tif_from_zip(zip_path: Path, tif_name: str, dest_dir: Path) -> Optional[Path]:
+    """Extrai um .tif específico do .zip para dest_dir."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_dir / Path(tif_name).name
+    if dest_file.exists():
+        return dest_file
     try:
-        bio_data = download_worldclim_bio(resolution, Path("/tmp/worldclim_cache"))
-        bio_clipped = clip_and_project_raster(bio_data, shapefile_gdf)
-        
-        # Process each bio layer
-        for layer_idx in range(bio_clipped.shape[0]):
-            bio_num = layer_idx + 1  # bio1, bio2, ..., bio19
-            bio_name = f"bio{bio_num}"
-            
-            if bio_layers and bio_name not in bio_layers:
-                continue
-            
-            out_file = output_dir / f"{prefix}_{res_tag}_{bio_name}.tif"
-            
-            if skip_existing and out_file.exists():
-                log_msg(logger, f"  [skip] {out_file.name}", "INFO")
-                skipped.append(str(out_file))
-                continue
-            
-            try:
-                layer_data = bio_clipped.isel(band=layer_idx).drop_vars('band', errors='ignore')
-                save_raster_to_tif(layer_data, out_file)
-                log_msg(logger, f"  [✓] Saved: {out_file.name}", "INFO")
-                generated.append(str(out_file))
-            except Exception as e:
-                log_msg(logger, f"  [!] Error saving {bio_name}: {str(e)}", "ERROR")
-    
+        with zipfile.ZipFile(zip_path, "r") as z:
+            with z.open(tif_name) as src, open(dest_file, "wb") as dst:
+                dst.write(src.read())
+        return dest_file
     except Exception as e:
-        log_msg(logger, f"[!] Error processing bio layers: {str(e)}", "ERROR")
-    
-    return generated, skipped
+        return None
 
 
-def process_climate_variables(shapefile_gdf, variables: List[str],
-                             resolution: float, output_dir: Path, metrics: MetricsCollector,
-                             logger: logging.Logger, skip_existing: bool = True) -> tuple[List[str], List[str]]:
+# =============================================================================
+# Recorte e reprojeção
+# =============================================================================
+
+def clip_and_reproject_tif(
+    src_path: Path,
+    shapes_gdf: gpd.GeoDataFrame,
+    out_path: Path,
+    target_crs: str = TARGET_CRS,
+) -> bool:
     """
-    Process individual climate variables (tavg, tmax, tmin, prec, etc.).
-    
-    Args:
-        shapefile_gdf: Study area geometry
-        variables: List of climate variables to process
-        resolution: Resolution in arc-minutes
-        output_dir: Output directory
-        metrics: MetricsCollector instance
-        logger: Logger instance
-        skip_existing: Skip existing files
-        
-    Returns:
-        Tuple of (generated_files, skipped_files)
+    Recorta src_path pela geometria de shapes_gdf e reprojeta para target_crs.
+    Salva em out_path. Retorna True em sucesso.
     """
-    generated = []
-    skipped = []
-    failed = []
-    
-    prefix = get_file_prefix(shapefile_gdf.name if hasattr(shapefile_gdf, 'name') else "study_area")
-    res_tag = f"{int(resolution)}arc"
-    
-    for var in variables:
-        if var == "bio":
-            continue  # Handled separately
-        
-        out_file = output_dir / f"{prefix}_{res_tag}_{var}_mean.tif"
-        
-        if skip_existing and out_file.exists():
-            log_msg(logger, f"[skip] {out_file.name}", "INFO")
-            skipped.append(str(out_file))
+    try:
+        with rasterio.open(src_path) as src:
+            src_crs = src.crs
+
+            # Reprojetar geometrias para o CRS do raster
+            shapes_reproj = shapes_gdf.to_crs(src_crs)
+            geoms = [mapping(geom) for geom in shapes_reproj.geometry]
+
+            # Recorte
+            out_image, out_transform = rio_mask(src, geoms, crop=True, nodata=src.nodata or -9999)
+            out_meta = src.meta.copy()
+            out_meta.update({
+                "driver": "GTiff",
+                "height": out_image.shape[1],
+                "width":  out_image.shape[2],
+                "transform": out_transform,
+                "crs": src_crs,
+                "compress": "lzw",
+            })
+
+        # Reprojetar para TARGET_CRS se necessário
+        dst_crs = CRS.from_string(target_crs)
+        if src_crs != dst_crs:
+            transform_dst, width_dst, height_dst = calculate_default_transform(
+                src_crs, dst_crs,
+                out_meta["width"], out_meta["height"],
+                *rasterio.transform.array_bounds(
+                    out_meta["height"], out_meta["width"], out_meta["transform"]
+                )
+            )
+            out_meta.update({
+                "crs": dst_crs,
+                "transform": transform_dst,
+                "width": width_dst,
+                "height": height_dst,
+            })
+            reproj_image = np.full(
+                (out_image.shape[0], height_dst, width_dst),
+                out_meta.get("nodata", -9999),
+                dtype=out_image.dtype
+            )
+            for i in range(out_image.shape[0]):
+                reproject(
+                    source=out_image[i],
+                    destination=reproj_image[i],
+                    src_transform=out_transform,
+                    src_crs=src_crs,
+                    dst_transform=transform_dst,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.bilinear,
+                )
+            out_image = reproj_image
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(out_path, "w", **out_meta) as dst:
+            dst.write(out_image)
+
+        return True
+
+    except Exception as e:
+        raise RuntimeError(f"clip_and_reproject falhou para {src_path.name}: {e}") from e
+
+
+# =============================================================================
+# Processamento: variáveis mensais (tavg, tmax, etc.)
+# =============================================================================
+
+def process_monthly_var(
+    var: str,
+    resolution: float,
+    shapes_gdf: gpd.GeoDataFrame,
+    prefix: str,
+    res_tag: str,
+    output_dir: Path,
+    worldclim_dir: Path,
+    skip_existing: bool,
+    metrics: MetricsCollector,
+    logger: logging.Logger,
+) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Baixa variável mensal, calcula média e salva .tif recortado.
+    Retorna (generated, skipped, failed).
+    """
+    generated, skipped, failed = [], [], []
+
+    out_file = output_dir / f"{prefix}_{res_tag}_{var}_mean.tif"
+
+    if skip_existing and out_file.exists():
+        log_msg(logger, f"[skip] {out_file.name}", "INFO")
+        skipped.append(str(out_file))
+        return generated, skipped, failed
+
+    res_str = RESOLUTION_MAP.get(resolution)
+    if not res_str:
+        log_msg(logger, f"[!] Resolução inválida: {resolution}", "ERROR")
+        failed.append(var)
+        return generated, skipped, failed
+
+    zip_name  = f"wc2.1_{res_str}_{var}.zip"
+    zip_url   = f"{WORLDCLIM_BASE}/{zip_name}"
+    zip_cache = worldclim_dir / zip_name
+
+    log_msg(logger, f"[→] Baixando: {var} ({res_str})", "INFO")
+    if not download_file(zip_url, zip_cache, logger):
+        failed.append(var)
+        return generated, skipped, failed
+
+    # Listar .tifs no zip (ex: wc2.1_10m_tavg_01.tif ... _12.tif)
+    tif_names = list_tifs_in_zip(zip_cache)
+    if not tif_names:
+        log_msg(logger, f"[!] Nenhum .tif encontrado no zip de {var}", "ERROR")
+        failed.append(var)
+        return generated, skipped, failed
+
+    log_msg(logger, f"[→] {len(tif_names)} rasters mensais encontrados em {zip_name}", "INFO")
+
+    # Extrair e recortar cada mês
+    extract_dir = worldclim_dir / f"extracted_{res_str}_{var}"
+    month_arrays = []
+    month_meta   = None
+
+    for tif_name in sorted(tif_names):
+        extracted = extract_tif_from_zip(zip_cache, tif_name, extract_dir)
+        if extracted is None:
             continue
-        
-        log_msg(logger, f"[→] Downloading: {var}", "INFO")
-        
+        # Ler após recortar em memória
+        temp_out = extract_dir / f"clip_{Path(tif_name).name}"
         try:
-            climate_data = download_worldclim_variable(var, resolution, Path("/tmp/worldclim_cache"))
-            r_clipped = clip_and_project_raster(climate_data, shapefile_gdf)
-            
-            # If multiple layers (e.g., 12 months), average them
-            if r_clipped.ndim > 2 and 'band' in r_clipped.dims:
-                r_out = r_clipped.mean(dim='band')
-            else:
-                r_out = r_clipped
-            
-            save_raster_to_tif(r_out, out_file)
-            log_msg(logger, f"[✓] Saved: {out_file.name}", "INFO")
-            generated.append(str(out_file))
-        
+            if not temp_out.exists():
+                clip_and_reproject_tif(extracted, shapes_gdf, temp_out)
+            with rasterio.open(temp_out) as src:
+                if month_meta is None:
+                    month_meta = src.meta.copy()
+                arr = src.read(1).astype(np.float32)
+                nodata = src.nodata
+                if nodata is not None:
+                    arr[arr == nodata] = np.nan
+                month_arrays.append(arr)
         except Exception as e:
-            log_msg(logger, f"[!] Error downloading {var}: {str(e)}", "ERROR")
-            failed.append(var)
-    
+            log_msg(logger, f"  [!] Erro processando {Path(tif_name).name}: {e}", "ERROR")
+
+    if not month_arrays or month_meta is None:
+        log_msg(logger, f"[!] Nenhum dado válido para {var}", "ERROR")
+        failed.append(var)
+        return generated, skipped, failed
+
+    # Média mensal (ignora NaN)
+    stack = np.stack(month_arrays, axis=0)
+    mean_arr = np.nanmean(stack, axis=0)
+
+    month_meta.update({
+        "count": 1,
+        "dtype": "float32",
+        "compress": "lzw",
+        "nodata": -9999.0,
+    })
+    mean_arr[np.isnan(mean_arr)] = -9999.0
+
+    try:
+        with rasterio.open(out_file, "w", **month_meta) as dst:
+            dst.write(mean_arr, 1)
+        log_msg(logger, f"[✓] Salvo: {out_file.name} | shape: {mean_arr.shape} "
+                        f"| min={np.nanmin(stack):.2f} max={np.nanmax(stack):.2f}", "INFO")
+        generated.append(str(out_file))
+    except Exception as e:
+        log_msg(logger, f"[!] Erro ao salvar {out_file.name}: {e}", "ERROR")
+        failed.append(var)
+
     return generated, skipped, failed
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Download WorldClim data and clip to study area shapefile",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python gen_rasters.py --job-id j1 --shapefile area.shp --output-dir output/ \
-    --worldclim-dir cache/ --variables tavg,tmax,bio
-        """
+# =============================================================================
+# Processamento: bioclim
+# =============================================================================
+
+def process_bio_layers(
+    bio_layers: List[str],
+    resolution: float,
+    shapes_gdf: gpd.GeoDataFrame,
+    prefix: str,
+    res_tag: str,
+    output_dir: Path,
+    worldclim_dir: Path,
+    skip_existing: bool,
+    metrics: MetricsCollector,
+    logger: logging.Logger,
+) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Baixa bioclim WorldClim (19 bandas num .zip) e salva .tif por layer.
+    Retorna (generated, skipped, failed).
+    """
+    generated, skipped, failed = [], [], []
+
+    res_str = RESOLUTION_MAP.get(resolution)
+    if not res_str:
+        log_msg(logger, f"[!] Resolução inválida: {resolution}", "ERROR")
+        return generated, skipped, [BIO_VAR]
+
+    zip_name  = f"wc2.1_{res_str}_bio.zip"
+    zip_url   = f"{WORLDCLIM_BASE}/{zip_name}"
+    zip_cache = worldclim_dir / zip_name
+
+    # Checar skip: se todos os layers já existem
+    all_exist = all(
+        (output_dir / f"{prefix}_{res_tag}_{b}.tif").exists()
+        for b in bio_layers
     )
-    
-    parser.add_argument("--job-id", required=True, help="Job identifier")
-    parser.add_argument("--shapefile", required=True, help="Path to study area shapefile")
-    parser.add_argument("--output-dir", required=True, help="Output directory for TIFs")
-    parser.add_argument("--worldclim-dir", required=True, help="WorldClim cache directory")
-    parser.add_argument("--variables", required=True, help="Comma-separated variable list (e.g., tavg,tmax,bio)")
-    parser.add_argument("--bio-layers", default="", help="Comma-separated bio layers (e.g., bio1,bio2,bio12)")
-    parser.add_argument("--resolution", type=float, default=5, help="Resolution in arc-minutes (2.5, 5, 10)")
-    parser.add_argument("--skip-existing", type=lambda x: x.lower() == 'true', default=True,
-                       help="Skip already-processed files (true/false)")
-    
+    if skip_existing and all_exist:
+        log_msg(logger, "[skip] Todos os layers bio já existem", "INFO")
+        for b in bio_layers:
+            skipped.append(str(output_dir / f"{prefix}_{res_tag}_{b}.tif"))
+        return generated, skipped, failed
+
+    log_msg(logger, f"[→] Baixando: bio ({res_str})", "INFO")
+    if not download_file(zip_url, zip_cache, logger):
+        return generated, skipped, [BIO_VAR]
+
+    tif_names = list_tifs_in_zip(zip_cache)
+    # Formato esperado: wc2.1_10m_bio_1.tif, wc2.1_10m_bio_2.tif, ...
+    # Ou (versões antigas): wc2.1_10m_bio1.tif, ...
+    log_msg(logger, f"[→] {len(tif_names)} arquivos no zip bio", "INFO")
+
+    extract_dir = worldclim_dir / f"extracted_{res_str}_bio"
+
+    for tif_name in sorted(tif_names):
+        # Extrair número do bio do nome do arquivo
+        match = re.search(r"bio_?(\d+)", Path(tif_name).stem, re.IGNORECASE)
+        if not match:
+            continue
+        bio_num  = int(match.group(1))
+        bio_name = f"bio{bio_num}"
+
+        if bio_name not in bio_layers:
+            continue
+
+        out_file = output_dir / f"{prefix}_{res_tag}_{bio_name}.tif"
+
+        if skip_existing and out_file.exists():
+            log_msg(logger, f"  [skip] {out_file.name}", "INFO")
+            skipped.append(str(out_file))
+            continue
+
+        extracted = extract_tif_from_zip(zip_cache, tif_name, extract_dir)
+        if extracted is None:
+            log_msg(logger, f"  [!] Falha ao extrair {tif_name}", "ERROR")
+            failed.append(bio_name)
+            continue
+
+        try:
+            clip_and_reproject_tif(extracted, shapes_gdf, out_file)
+            with rasterio.open(out_file) as src:
+                arr = src.read(1, masked=True)
+                log_msg(logger, f"  [✓] Salvo: {out_file.name} "
+                                f"| shape: {arr.shape} "
+                                f"| min={float(arr.min()):.2f} max={float(arr.max()):.2f}", "INFO")
+            generated.append(str(out_file))
+        except Exception as e:
+            log_msg(logger, f"  [!] Erro processando {bio_name}: {e}", "ERROR")
+            failed.append(bio_name)
+
+    return generated, skipped, failed
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Baixa WorldClim e recorta para área de estudo (equiv. gen_rasters.R)"
+    )
+    parser.add_argument("--job-id",        required=True)
+    parser.add_argument("--shapefile",      required=True)
+    parser.add_argument("--output-dir",     required=True)
+    parser.add_argument("--worldclim-dir",  required=True)
+    parser.add_argument("--variables",      required=True)
+    parser.add_argument("--bio-layers",     default="")
+    parser.add_argument("--resolution",     type=float, default=5)
+    parser.add_argument("--skip-existing",  type=lambda x: x.lower() == "true", default=True)
+
     args = parser.parse_args()
-    
-    # Initialize output directory and logging
-    output_dir = ensure_output_dir(Path(args.output_dir))
-    logger = setup_logging(output_dir, args.job_id, "gen_rasters")
-    metrics = MetricsCollector(args.job_id)
-    
-    log_msg(logger, f"[→] Job gen_rasters initiated: {args.job_id}", "INFO")
+
+    output_dir    = ensure_output_dir(Path(args.output_dir))
+    worldclim_dir = ensure_output_dir(Path(args.worldclim_dir))
+    logger        = setup_logging(output_dir, args.job_id, "gen_rasters")
+    metrics       = MetricsCollector(args.job_id)
+
+    log_msg(logger, f"[→] Job gen_rasters iniciado: {args.job_id}", "INFO")
     log_msg(logger, f"[→] Shapefile: {args.shapefile}", "INFO")
-    log_msg(logger, f"[→] Variables: {args.variables}", "INFO")
-    log_msg(logger, f"[→] Resolution: {args.resolution} arc-min", "INFO")
+    log_msg(logger, f"[→] Variáveis: {args.variables}", "INFO")
+    log_msg(logger, f"[→] Resolução: {args.resolution} arc-min", "INFO")
     log_msg(logger, f"[→] Skip existing: {args.skip_existing}", "INFO")
-    
-    try:
-        # Load shapefile
-        log_msg(logger, "[→] Loading shapefile...", "INFO")
-        shapefile_gdf = load_shapefile(args.shapefile)
-        log_msg(logger, f"[✓] Shapefile loaded: {Path(args.shapefile).name}", "INFO")
-        
-        # Parse variables and bio layers
-        variables = parse_csv_list(args.variables)
-        bio_layers = parse_csv_list(args.bio_layers) if args.bio_layers else [f"bio{i}" for i in range(1, 20)]
-        
-        all_generated = []
-        all_skipped = []
-        all_failed = []
-        
-        # Process bio layers
-        if "bio" in variables:
-            gen, skipped = process_bio_layers(
-                shapefile_gdf, variables, bio_layers,
-                args.resolution, output_dir, metrics, logger,
-                args.skip_existing
-            )
-            all_generated.extend(gen)
-            all_skipped.extend(skipped)
-        
-        # Process climate variables
-        climate_vars = [v for v in variables if v != "bio"]
-        if climate_vars:
-            gen, skipped, failed = process_climate_variables(
-                shapefile_gdf, climate_vars,
-                args.resolution, output_dir, metrics, logger,
-                args.skip_existing
-            )
-            all_generated.extend(gen)
-            all_skipped.extend(skipped)
-            all_failed.extend(failed)
-        
-        # Save metrics
-        metrics.add("generated_files", all_generated)
-        metrics.add("skipped_files", all_skipped)
-        metrics.add("failed_vars", all_failed)
-        metrics.add("output_dir", str(output_dir))
-        metrics_path = output_dir / "metrics.json"
-        metrics.save(metrics_path)
-        
-        log_msg(logger, f"[✓] metrics.json saved: {metrics_path}", "INFO")
-        
-        if all_failed:
-            log_msg(logger, f"[!] Variables with failures: {', '.join(all_failed)}", "WARNING")
-            sys.exit(1)
-        
-        log_msg(logger, f"[★] gen_rasters completed successfully", "INFO")
-        sys.exit(0)
-    
-    except Exception as e:
-        log_msg(logger, f"[!] Fatal error: {str(e)}", "ERROR")
-        metrics.add("error", str(e))
-        metrics.save(output_dir / "metrics.json")
+
+    # Verificar shapefile
+    if not Path(args.shapefile).exists():
+        log_msg(logger, f"[!] Shapefile não encontrado: {args.shapefile}", "ERROR")
         sys.exit(1)
+
+    try:
+        log_msg(logger, "[→] Carregando shapefile...", "INFO")
+        shapes_gdf = load_shapefile(args.shapefile)
+        log_msg(logger, f"[✓] Shapefile carregado: {Path(args.shapefile).name} | "
+                        f"CRS: {shapes_gdf.crs} | features: {len(shapes_gdf)}", "INFO")
+    except Exception as e:
+        log_msg(logger, f"[!] Erro ao carregar shapefile: {e}", "ERROR")
+        sys.exit(1)
+
+    variables  = parse_csv_list(args.variables)
+    bio_layers = (
+        parse_csv_list(args.bio_layers)
+        if args.bio_layers
+        else [f"bio{i}" for i in range(1, 20)]
+    )
+    prefix  = get_file_prefix(args.shapefile)
+    res_tag = f"{int(args.resolution)}arc"
+
+    all_generated: List[str] = []
+    all_skipped:   List[str] = []
+    all_failed:    List[str] = []
+
+    for var in variables:
+        if var == BIO_VAR:
+            gen, skip, fail = process_bio_layers(
+                bio_layers, args.resolution, shapes_gdf,
+                prefix, res_tag, output_dir, worldclim_dir,
+                args.skip_existing, metrics, logger,
+            )
+        elif var in MONTHLY_VARS:
+            gen, skip, fail = process_monthly_var(
+                var, args.resolution, shapes_gdf,
+                prefix, res_tag, output_dir, worldclim_dir,
+                args.skip_existing, metrics, logger,
+            )
+        else:
+            log_msg(logger, f"[!] Variável desconhecida (ignorada): {var}", "WARNING")
+            gen, skip, fail = [], [], [var]
+
+        all_generated.extend(gen)
+        all_skipped.extend(skip)
+        all_failed.extend(fail)
+
+    log_msg(logger, f"[→] Resumo: gerados={len(all_generated)} "
+                    f"| pulados={len(all_skipped)} | falhos={len(all_failed)}", "INFO")
+
+    metrics.add("generated_files", all_generated)
+    metrics.add("skipped_files",   all_skipped)
+    metrics.add("failed_vars",     all_failed)
+    metrics.add("output_dir",      str(output_dir))
+    metrics.save(output_dir / "metrics.json")
+    log_msg(logger, f"[✓] metrics.json salvo", "INFO")
+
+    if all_failed:
+        log_msg(logger, f"[!] Variáveis com falha: {', '.join(all_failed)}", "ERROR")
+        sys.exit(1)
+
+    log_msg(logger, "[★] gen_rasters concluído com sucesso", "INFO")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -1,22 +1,21 @@
 # ── Celery Worker com R 4.4 + Python 3.12 ──────────────────
 FROM rocker/r-ver:4.4
 
-# Configurações de ambiente
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-# Define o caminho do ambiente virtual para que o Python o use automaticamente
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 WORKDIR /app
 
-# 1. Instalar dependências do sistema e Python 3.12
+# 1. Dependências do sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 \
     python3.12-dev \
     python3.12-venv \
     python3-pip \
     gcc \
+    default-libmysqlclient-dev \
     pkg-config \
     libgdal-dev \
     gdal-bin \
@@ -31,24 +30,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Criar e ativar o ambiente virtual (venv)
+# 2. Criar ambiente virtual Python
 RUN python3.12 -m venv $VIRTUAL_ENV
 
-# 3. Instalar pacotes R (Ncpus=4 para acelerar a compilação)
+# 3. Instalar pacotes R
 RUN Rscript -e "install.packages('pak', repos='https://cloud.r-project.org')" && \
     Rscript -e "pak::pkg_install(c( \
       'terra','sf','randomForest','ranger','VSURF','rsample', \
       'dplyr','readxl','geodata','optparse','jsonlite' \
     ))"
 
-# 4. Instalar dependências Python dentro do venv
-# Note que como o PATH foi alterado, o comando 'pip' já aponta para o venv
-COPY requirements.txt .
+# 4. Instalar dependências Python (requirements exclusivo do worker)
+COPY requirements.worker.txt .
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.worker.txt
 
-# 5. Copiar o restante do código
+# 5. Copiar código
 COPY . .
-
-# O comando para rodar o worker (exemplo, ajuste conforme seu projeto)
-# CMD ["celery", "-A", "seu_projeto", "worker", "--loglevel=info"]

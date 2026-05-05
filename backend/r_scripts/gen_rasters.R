@@ -53,64 +53,143 @@ bio_layers    <- if (nchar(opt[["bio-layers"]]) > 0) trimws(strsplit(opt[["bio-l
 resolution    <- as.numeric(opt[["resolution"]])
 skip_existing <- toupper(opt[["skip-existing"]]) == "TRUE"
 
-# ── Helpers de log ─────────────────────────────────────────────────────────────
-log_path <- NULL
-
-log_msg <- function(msg) {
-  line <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
-  cat(line, "\n", sep = "")
-  if (!is.null(log_path)) cat(line, "\n", sep = "", file = log_path, append = TRUE)
-}
-
 # ── Criar diretórios ───────────────────────────────────────────────────────────
 if (!dir.exists(output_dir))    dir.create(output_dir,    recursive = TRUE)
 if (!dir.exists(worldclim_dir)) dir.create(worldclim_dir, recursive = TRUE)
+
 log_path <- file.path(output_dir, "log.txt")
+
+# ── Helpers de log ─────────────────────────────────────────────────────────────
+log_msg <- function(msg) {
+  line <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
+  cat(line, "\n", sep = "")
+  cat(line, "\n", sep = "", file = log_path, append = TRUE)
+}
 
 log_msg(paste("[→] Job gen_rasters iniciado:", job_id))
 log_msg(paste("[→] Shapefile:", shp_path))
 log_msg(paste("[→] Variáveis:", paste(variables, collapse = ", ")))
 log_msg(paste("[→] Resolução:", resolution, "arc-min"))
 log_msg(paste("[→] Skip existing:", skip_existing))
+log_msg(paste("[→] WorldClim cache dir:", worldclim_dir))
+log_msg(paste("[→] Output dir:", output_dir))
+
+# ── Diagnóstico de permissões ──────────────────────────────────────────────────
+log_msg("[→] Verificando permissões de diretórios...")
+
+check_dir <- function(path, label) {
+  if (!dir.exists(path)) {
+    log_msg(paste("[!] Diretório não existe:", label, "->", path))
+    return(FALSE)
+  }
+  test_file <- file.path(path, paste0(".write_test_", Sys.getpid()))
+  ok <- tryCatch({
+    writeLines("test", test_file)
+    file.remove(test_file)
+    TRUE
+  }, error = function(e) {
+    log_msg(paste("[!] Sem permissão de escrita em", label, ":", e$message))
+    FALSE
+  })
+  if (ok) log_msg(paste("[✓]", label, "OK →", path))
+  ok
+}
+
+if (!check_dir(output_dir,    "output-dir"))    quit(status = 1)
+if (!check_dir(worldclim_dir, "worldclim-dir")) quit(status = 1)
+
+# ── Verificar shapefile ────────────────────────────────────────────────────────
+log_msg(paste("[→] Verificando shapefile:", shp_path))
+if (!file.exists(shp_path)) {
+  log_msg(paste("[!] ERRO: shapefile não encontrado:", shp_path))
+  quit(status = 1)
+}
 
 # ── Carregar shapefile ─────────────────────────────────────────────────────────
 log_msg("[→] Carregando shapefile...")
 area <- tryCatch(
   terra::vect(shp_path),
-  error = function(e) stop("Erro ao carregar shapefile: ", e$message)
+  error = function(e) {
+    log_msg(paste("[!] ERRO ao carregar shapefile:", e$message))
+    NULL
+  }
 )
+if (is.null(area)) quit(status = 1)
+
 log_msg(paste("[✓] Shapefile carregado:", basename(shp_path)))
+log_msg(paste("[→] Extensão da área:", paste(round(as.vector(ext(area)), 4), collapse = " ")))
+log_msg(paste("[→] CRS do shapefile:", crs(area, describe = TRUE)$code))
+
+# ── Garantir que o terra use o cache dir correto ───────────────────────────────
+# terra/geodata usa getOption("geodata_path"); setamos explicitamente
+options(geodata_path = worldclim_dir)
+log_msg(paste("[→] geodata_path setado para:", worldclim_dir))
 
 # ── Prefixo para nomear os arquivos de saída ───────────────────────────────────
-# Mesmo esquema do app.R: {prefix}_{res}arc_{var}_mean.tif ou {prefix}_{res}arc_bio{N}.tif
 prefix  <- gsub("[^A-Za-z0-9_]", "_", tools::file_path_sans_ext(basename(shp_path)))
 res_tag <- paste0(resolution, "arc")
 
-# Guarda quais arquivos foram gerados para o metrics.json
 generated_files <- character(0)
 skipped_files   <- character(0)
 failed_vars     <- character(0)
+
+# ── Helper: reprojetar, recortar, mascarar ─────────────────────────────────────
+process_raster <- function(r, area_vect, target_crs = "EPSG:4674") {
+  # Reprojetar área para o CRS do raster para fazer crop mais eficiente
+  area_reproj <- tryCatch(project(area_vect, crs(r)), error = function(e) area_vect)
+  r_crop   <- terra::crop(r, area_reproj)
+  r_masked <- terra::mask(r_crop, area_reproj)
+  # Reprojetar raster para SIRGAS 2000
+  terra::project(r_masked, target_crs)
+}
 
 # ── Processar cada variável ────────────────────────────────────────────────────
 for (var in variables) {
 
   if (var == "bio") {
     # ── Bioclim (bio1–bio19) ────────────────────────────────────────────────
+    out_file_check <- file.path(output_dir, paste0(prefix, "_", res_tag, "_bio1.tif"))
+    if (skip_existing && file.exists(out_file_check)) {
+      log_msg("[skip] Layers bio já existem — pulando download")
+      # Registrar todos os existentes como skipped
+      for (bname in bio_layers) {
+        f <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", bname, ".tif"))
+        if (file.exists(f)) skipped_files <- c(skipped_files, f)
+      }
+      next
+    }
+
     log_msg("[→] Baixando: bio (WorldClim bioclim)")
+    log_msg(paste("[→] Isso pode levar vários minutos dependendo da conexão (res =", resolution, ")"))
 
-    bio_data <- tryCatch(
-      geodata::worldclim_global(var = "bio", res = resolution, path = worldclim_dir),
-      error = function(e) { log_msg(paste("[!] Erro ao baixar bio:", e$message)); NULL }
+    bio_data <- tryCatch({
+      geodata::worldclim_global(var = "bio", res = resolution, path = worldclim_dir)
+    }, error = function(e) {
+      log_msg(paste("[!] ERRO ao baixar bio:", e$message))
+      NULL
+    })
+
+    if (is.null(bio_data)) {
+      log_msg("[!] Download de bio falhou. Verifique conectividade e permissões do worldclim-dir.")
+      failed_vars <- c(failed_vars, "bio")
+      next
+    }
+
+    log_msg(paste("[✓] bio baixado:", nlyr(bio_data), "camadas"))
+    log_msg("[→] Recortando e reprojetando bio...")
+
+    bio_proc <- tryCatch(
+      process_raster(bio_data, area),
+      error = function(e) {
+        log_msg(paste("[!] ERRO ao processar bio:", e$message))
+        NULL
+      }
     )
-    if (is.null(bio_data)) { failed_vars <- c(failed_vars, "bio"); next }
+    if (is.null(bio_proc)) { failed_vars <- c(failed_vars, "bio"); next }
 
-    bio_crop   <- terra::crop(bio_data, area)
-    bio_masked <- terra::mask(bio_crop, area)
-    bio_sirgas <- terra::project(bio_masked, "EPSG:4674")
-
-    # Normaliza nomes das camadas para bio1, bio2, …, bio19
-    layer_names <- names(bio_sirgas)
-    bio_nums    <- gsub("bio_?0*", "bio", regmatches(layer_names, regexpr("bio_?0*([0-9]+)$", layer_names)))
+    # Normalizar nomes das camadas
+    layer_names <- names(bio_proc)
+    bio_nums    <- gsub(".*bio_?0*([0-9]+).*", "bio\\1", layer_names)
 
     for (j in seq_along(bio_nums)) {
       bname <- bio_nums[j]
@@ -125,7 +204,7 @@ for (var in variables) {
       }
 
       tryCatch({
-        terra::writeRaster(bio_sirgas[[j]], filename = out_file, overwrite = TRUE)
+        terra::writeRaster(bio_proc[[j]], filename = out_file, overwrite = TRUE)
         log_msg(paste("  [✓] Salvo:", basename(out_file)))
         generated_files <- c(generated_files, out_file)
       }, error = function(e) {
@@ -135,7 +214,7 @@ for (var in variables) {
     }
 
   } else {
-    # ── Variáveis climáticas simples (tavg, tmax, tmin, prec, srad, vapr, wind, elev) ──
+    # ── Variáveis climáticas simples ───────────────────────────────────────
     out_file <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", var, "_mean.tif"))
 
     if (skip_existing && file.exists(out_file)) {
@@ -144,23 +223,48 @@ for (var in variables) {
       next
     }
 
-    log_msg(paste("[→] Baixando:", var))
-    climate_data <- tryCatch(
-      geodata::worldclim_global(var = var, res = resolution, path = worldclim_dir),
-      error = function(e) { log_msg(paste("  [!] Erro ao baixar", var, ":", e$message)); NULL }
+    log_msg(paste("[→] Baixando:", var, "(res =", resolution, "arc-min)"))
+    log_msg("[→] Aguardando resposta do WorldClim... (pode levar minutos)")
+
+    climate_data <- tryCatch({
+      geodata::worldclim_global(var = var, res = resolution, path = worldclim_dir)
+    }, error = function(e) {
+      log_msg(paste("[!] ERRO ao baixar", var, ":", e$message))
+      NULL
+    })
+
+    if (is.null(climate_data)) {
+      log_msg(paste("[!] Download de", var, "falhou."))
+      failed_vars <- c(failed_vars, var)
+      next
+    }
+
+    log_msg(paste("[✓]", var, "baixado:", nlyr(climate_data), "camada(s)"))
+    log_msg(paste("[→] Recortando e reprojetando", var, "..."))
+
+    r_proc <- tryCatch(
+      process_raster(climate_data, area),
+      error = function(e) {
+        log_msg(paste("[!] ERRO ao processar", var, ":", e$message))
+        NULL
+      }
     )
-    if (is.null(climate_data)) { failed_vars <- c(failed_vars, var); next }
+    if (is.null(r_proc)) { failed_vars <- c(failed_vars, var); next }
 
-    r_crop   <- terra::crop(climate_data, area)
-    r_masked <- terra::mask(r_crop, area)
-    r_sirgas <- terra::project(r_masked, "EPSG:4674")
-
-    # Variáveis com múltiplas camadas (ex: tavg tem 12 meses) → média
-    r_out <- if (terra::nlyr(r_sirgas) > 1) terra::app(r_sirgas, mean) else r_sirgas
+    # Múltiplas camadas (ex: 12 meses) → média
+    r_out <- if (terra::nlyr(r_proc) > 1) {
+      log_msg(paste("[→]", var, "tem", nlyr(r_proc), "camadas — calculando média mensal"))
+      terra::app(r_proc, mean)
+    } else {
+      r_proc
+    }
 
     tryCatch({
       terra::writeRaster(r_out, filename = out_file, overwrite = TRUE)
-      log_msg(paste("[✓] Salvo:", basename(out_file)))
+      log_msg(paste("[✓] Salvo:", basename(out_file),
+                    "| dimensões:", nrow(r_out), "x", ncol(r_out),
+                    "| valores: [", round(global(r_out, "min", na.rm=TRUE)[[1]], 2),
+                    ";", round(global(r_out, "max", na.rm=TRUE)[[1]], 2), "]"))
       generated_files <- c(generated_files, out_file)
     }, error = function(e) {
       log_msg(paste("[!] Erro ao salvar", var, ":", e$message))
@@ -168,6 +272,11 @@ for (var in variables) {
     })
   }
 }
+
+# ── Resumo ─────────────────────────────────────────────────────────────────────
+log_msg(paste("[→] Resumo: gerados =", length(generated_files),
+              "| pulados =", length(skipped_files),
+              "| falhos =", length(failed_vars)))
 
 # ── Salvar metrics.json ────────────────────────────────────────────────────────
 metrics <- list(
