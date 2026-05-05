@@ -148,12 +148,21 @@ log_msg("[→] Carregando rasters...")
 # Aceita tanto os .tif passados diretamente (via --raster-paths futuro)
 # quanto todos os .tif do diretório (comportamento atual)
 raster_files <- list.files(raster_dir, pattern = "\\.tif$", full.names = TRUE)
+log_msg(paste("[→] Arquivos .tif encontrados:", length(raster_files)))
 
 if (length(raster_files) == 0) {
   stop("Nenhum .tif encontrado em: ", raster_dir)
 }
 
-r_stack <- rast(raster_files)
+log_msg(paste("[→] Primeiro raster:", basename(raster_files[[1]])))
+
+r_stack <- tryCatch({
+  rast(raster_files)
+}, error = function(e) {
+  log_msg(paste("[!] Erro ao carregar stack de rasters:", e$message))
+  stop(e)
+})
+
 names(r_stack) <- tools::file_path_sans_ext(basename(raster_files))
 
 # Reprojetar se necessário

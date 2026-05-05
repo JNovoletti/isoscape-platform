@@ -1,12 +1,18 @@
-Testar envio de tasks e funcionamento no R.
+Teste do backend (R e Python) com escolha de engine por job
 
-1 - docker compose up -d db redis backend worker
+1) Subir serviços
+- docker compose up -d db redis backend workek
 
-2 - docker compose exec worker python manage.py makemigrations
-3 - docker compose exec worker python manage.py migrate
-4 - docker compose exec worker python manage.py shell
 
-NO shell:
+2) Migrar banco
+- docker compose exec worker python manage.py makemigrations
+- docker compose exec worker python manage.py migrate
+
+
+3) Criar dados mínimos no shell Django
+- docker compose exec worker python manage.py shell
+
+No shell:
 
 from django.contrib.auth import get_user_model
 from apps.projects.models import Project
@@ -26,13 +32,18 @@ sa = StudyArea.objects.create(
 )
 print("StudyArea:", sa)
 
-job = Job.objects.create(
+# ==========================================================
+# ETAPA A — Geração de rasters (gen_rasters)
+# Troque execution_engine para "r" ou "python"
+# ==========================================================
+job_rasters = Job.objects.create(
     project=project,
     created_by=user,
     job_type=Job.JobType.GEN_RASTERS,
     status=Job.Status.PENDING,
     config={
-        "study_area_id":   sa.id,
+        "execution_engine": "r",      # ou "python"
+        "study_area_id": sa.id,
         "study_area_name": sa.name,
         "shapefile_path":  sa.file_path,
         "variables":       ["tavg"],
@@ -40,19 +51,64 @@ job = Job.objects.create(
         "skip_existing":   True,
     }
 )
-print("Job criado:", job, "| status:", job.status)
+print("Job rasters:", job_rasters.id, "| status:", job_rasters.status)
+
 
 from apps.jobs.tasks import gen_rasters_task
-gen_rasters_task.delay(job.id)
+gen_rasters_task.delay(job_rasters.id)
 
-Ver logs no worker:
-docker compose logs -f worker
+# ==========================================================
+# ETAPA B — Geração de isoscape (run_isoscape)
+# Troque execution_engine para "r" ou "python"
+# ==========================================================
 
-Se concluiu:
-job.refresh_from_db()
-print(job.status)
+job_iso = Job.objects.create(
+    project=project,
+    created_by=user,
+    job_type=Job.JobType.RUN_ISOSCAPE,
+    status=Job.Status.PENDING,
+    config={
+        "execution_engine": "r",      # ou "python"
+        "dataset_path": "/data/datasets/madeiras.csv",
+        "raster_dir": f"/data/rasters/{project.id}/{sa.name}",
+        "response_col": "d13C_wood",
+        "lat_col": "latitude",
+        "lon_col": "longitude",
+        "uncertainty": "quantile_rf",
+        "resolution": "10",
+    }
+)
+print("Job isoscape:", job_iso.id)
 
-Teste script isoscape:
+from apps.jobs.tasks import run_isoscape_task
+run_isoscape_task.delay(job_iso.id)
 
-docker compose exec worker Rscript r_scripts/run_isoscape.R --job-id test --dataset-path /data/datasets/madeiras.csv --raster-dir /data/raster s/1/amazonia_legal --output-dir /data/isoscapes/test --response-col d13C_wood --lat-col latitude --lon-col longitude --uncertainty quantile_rf --resolution 10
+4) Ver logs do worker
+- docker compose logs -f worker
 
+5) Conferir status do job no shell
+job_rasters.refresh_from_db()
+print(job_rasters.status, job_rasters.error_message)
+job_iso.refresh_from_db()
+print(job_iso.status, job_iso.error_message)
+
+6) Debug do problema "Carregando rasters..."
+- Verifique se o diretório tem .tif:
+  docker compose exec worker bash -lc 'ls -lh /data/rasters/1/amazonia_legal/*.tif'
+
+- Rodar script R manualmente (sem espaço no caminho de raster-dir):
+  docker compose exec worker Rscript r_scripts/run_isoscape.R \
+    --job-id test \
+    --dataset-path /data/datasets/madeiras.csv \
+    --raster-dir /data/rasters/1/amazonia_legal \
+    --output-dir /data/isoscapes/test \
+    --response-col d13C_wood \
+    --lat-col latitude \
+    --lon-col longitude \
+    --uncertainty quantile_rf \
+    --resolution 10
+
+Observações importantes
+- O worker agora registra no log qual engine foi usada: [engine] r, [engine] python, ou [engine] r (fallback).
+- Se o script Python falhar e SCRIPT_ENGINE_FALLBACK estiver ativo, ele tenta R automaticamente.
+- Scripts Python ainda não são 100% equivalentes ao pipeline R para todos os cenários; use R como referência de produção até validar paridade.

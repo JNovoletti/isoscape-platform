@@ -37,7 +37,7 @@ def _get_execution_command(script_type: str, job_id: int, job_config: dict,
     Returns:
         Command list for subprocess.run(), or None if engine is 'r' (use old code)
     """
-    engine = settings.EXECUTION_ENGINE.lower()
+    engine = str(job_config.get("execution_engine", settings.EXECUTION_ENGINE)).lower()
     
     if engine == "python":
         # Build Python command
@@ -165,13 +165,13 @@ def gen_rasters_task(self, job_id: int):
             output_dir / "metrics.json"
         )
 
-        job.log = proc.stdout
+        job.log = f"[engine] {engine_used}\n" + (proc.stdout or "")
         if proc.returncode != 0:
             _update_job(
                 job,
                 status=Job.Status.FAILED,
-                log=proc.stdout,
-                error_message=proc.stderr,
+                log=f"[engine] {engine_used}\n" + (proc.stdout or ""),
+                error_message=(proc.stderr or proc.stdout),
                 finished_at=datetime.now(),
             )
             return
@@ -201,7 +201,7 @@ def gen_rasters_task(self, job_id: int):
         _update_job(
             job,
             status=Job.Status.COMPLETED,
-            log=proc.stdout,
+            log=f"[engine] {engine_used}\n" + (proc.stdout or ""),
             progress_step="2/2 — Complete",
             finished_at=datetime.now(),
         )
@@ -259,13 +259,13 @@ def run_isoscape_task(self, job_id: int):
             output_dir / "metrics.json"
         )
 
-        job.log = proc.stdout
+        job.log = f"[engine] {engine_used}\n" + (proc.stdout or "")
         if proc.returncode != 0:
             _update_job(
                 job,
                 status=Job.Status.FAILED,
-                log=proc.stdout,
-                error_message=proc.stderr,
+                log=f"[engine] {engine_used}\n" + (proc.stdout or ""),
+                error_message=(proc.stderr or proc.stdout),
                 finished_at=datetime.now(),
             )
             return
@@ -293,7 +293,7 @@ def run_isoscape_task(self, job_id: int):
         _update_job(
             job,
             status=Job.Status.COMPLETED,
-            log=proc.stdout,
+            log=f"[engine] {engine_used}\n" + (proc.stdout or ""),
             progress_step="7/7 — Complete",
             finished_at=datetime.now(),
         )
