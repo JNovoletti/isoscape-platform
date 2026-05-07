@@ -23,7 +23,7 @@ docker compose cp caminho/local/amazonia_legal.shp worker:/data/shapefiles/
 ## 1. Subir serviços
 
 ```bash
-docker compose up -d db redis backend worker
+make up back
 ```
 
 ---
@@ -31,8 +31,8 @@ docker compose up -d db redis backend worker
 ## 2. Migrar banco
 
 ```bash
-docker compose exec worker python manage.py makemigrations
-docker compose exec worker python manage.py migrate
+make migrations
+make migrate
 ```
 
 ---
@@ -40,7 +40,7 @@ docker compose exec worker python manage.py migrate
 ## 3. Criar dados mínimos no shell Django
 
 ```bash
-docker compose exec worker python manage.py shell
+make shell
 ```
 
 Cole no shell:
@@ -130,7 +130,7 @@ gen_rasters_task.delay(job_py.id)
 ```
 
 ### Verificar status de gen_rasters
-
+#### R
 ```python
 # Troque JOB_ID pelo id retornado acima
 import time
@@ -145,6 +145,23 @@ if job_r.status == "failed":
     print("ERRO R:", job_r.error_message)
     print("LOG R:\n", job_r.log[:3000])
 ```
+
+#### Python
+```python
+# Troque JOB_ID pelo id retornado acima
+import time
+for _ in range(12):       # checa por até 2 minutos
+    job_py.refresh_from_db()
+    print(f"[PY]  status={job_py.status} | step={job_py.progress_step}")
+    if job_py.status in ("completed", "failed"):
+        break
+    time.sleep(10)
+
+if job_py.status == "failed":
+    print("ERRO PY:", job_py.error_message)
+    print("LOG PY:\n", job_py.log[:3000])
+```
+
 
 ---
 

@@ -120,8 +120,7 @@ log_msg(paste("[✓] Shapefile carregado:", basename(shp_path)))
 log_msg(paste("[→] Extensão da área:", paste(round(as.vector(ext(area)), 4), collapse = " ")))
 log_msg(paste("[→] CRS do shapefile:", crs(area, describe = TRUE)$code))
 
-# ── Garantir que o terra use o cache dir correto ───────────────────────────────
-# terra/geodata usa getOption("geodata_path"); setamos explicitamente
+# ── Garantir que o geodata use o cache dir correto ─────────────────────────────
 options(geodata_path = worldclim_dir)
 log_msg(paste("[→] geodata_path setado para:", worldclim_dir))
 
@@ -133,13 +132,23 @@ generated_files <- character(0)
 skipped_files   <- character(0)
 failed_vars     <- character(0)
 
-# ── Helper: reprojetar, recortar, mascarar ─────────────────────────────────────
+# ── Helper: reprojetar área, recortar, mascarar e reprojetar raster ────────────
+#
+# Equivalente a:
+#   area_reproj <- project(area_vect, crs(r))
+#   r_crop      <- crop(r, area_reproj)
+#   r_masked    <- mask(r_crop, area_reproj)
+#   project(r_masked, target_crs)
+#
+# O na.rm=TRUE em terra::app garante que nodata não contamina a média
+# (terra trata valores NA internamente de forma segura — sem lixo de borda).
 process_raster <- function(r, area_vect, target_crs = "EPSG:4674") {
-  # Reprojetar área para o CRS do raster para fazer crop mais eficiente
-  area_reproj <- tryCatch(project(area_vect, crs(r)), error = function(e) area_vect)
+  area_reproj <- tryCatch(
+    terra::project(area_vect, terra::crs(r)),
+    error = function(e) area_vect
+  )
   r_crop   <- terra::crop(r, area_reproj)
   r_masked <- terra::mask(r_crop, area_reproj)
-  # Reprojetar raster para SIRGAS 2000
   terra::project(r_masked, target_crs)
 }
 
@@ -148,19 +157,18 @@ for (var in variables) {
 
   if (var == "bio") {
     # ── Bioclim (bio1–bio19) ────────────────────────────────────────────────
-    out_file_check <- file.path(output_dir, paste0(prefix, "_", res_tag, "_bio1.tif"))
+    out_file_check <- file.path(output_dir, paste0(prefix, "_", res_tag, "_bio1_r.tif"))
     if (skip_existing && file.exists(out_file_check)) {
       log_msg("[skip] Layers bio já existem — pulando download")
-      # Registrar todos os existentes como skipped
       for (bname in bio_layers) {
-        f <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", bname, ".tif"))
+        f <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", bname, "_r.tif"))
         if (file.exists(f)) skipped_files <- c(skipped_files, f)
       }
       next
     }
 
     log_msg("[→] Baixando: bio (WorldClim bioclim)")
-    log_msg(paste("[→] Isso pode levar vários minutos dependendo da conexão (res =", resolution, ")"))
+    log_msg(paste("[→] Aguardando resposta do WorldClim... (pode levar minutos)"))
 
     bio_data <- tryCatch({
       geodata::worldclim_global(var = "bio", res = resolution, path = worldclim_dir)
@@ -175,7 +183,7 @@ for (var in variables) {
       next
     }
 
-    log_msg(paste("[✓] bio baixado:", nlyr(bio_data), "camadas"))
+    log_msg(paste("[✓] bio baixado:", terra::nlyr(bio_data), "camadas"))
     log_msg("[→] Recortando e reprojetando bio...")
 
     bio_proc <- tryCatch(
@@ -187,7 +195,7 @@ for (var in variables) {
     )
     if (is.null(bio_proc)) { failed_vars <- c(failed_vars, "bio"); next }
 
-    # Normalizar nomes das camadas
+    # Normalizar nomes das camadas (ex: wc2.1_bio_1 → bio1)
     layer_names <- names(bio_proc)
     bio_nums    <- gsub(".*bio_?0*([0-9]+).*", "bio\\1", layer_names)
 
@@ -195,7 +203,7 @@ for (var in variables) {
       bname <- bio_nums[j]
       if (!bname %in% bio_layers) next
 
-      out_file <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", bname, ".tif"))
+      out_file <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", bname, "_r.tif"))
 
       if (skip_existing && file.exists(out_file)) {
         log_msg(paste("  [skip]", basename(out_file)))
@@ -205,7 +213,13 @@ for (var in variables) {
 
       tryCatch({
         terra::writeRaster(bio_proc[[j]], filename = out_file, overwrite = TRUE)
-        log_msg(paste("  [✓] Salvo:", basename(out_file)))
+        r_tmp <- terra::rast(out_file)
+        log_msg(paste("  [✓] Salvo:", basename(out_file),
+                      "| dimensões:", nrow(r_tmp), "x", ncol(r_tmp),
+                      "| valores: [",
+                      round(terra::global(r_tmp, "min", na.rm = TRUE)[[1]], 2),
+                      ";",
+                      round(terra::global(r_tmp, "max", na.rm = TRUE)[[1]], 2), "]"))
         generated_files <- c(generated_files, out_file)
       }, error = function(e) {
         log_msg(paste("  [!] Erro ao salvar", bname, ":", e$message))
@@ -214,8 +228,8 @@ for (var in variables) {
     }
 
   } else {
-    # ── Variáveis climáticas simples ───────────────────────────────────────
-    out_file <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", var, "_mean.tif"))
+    # ── Variáveis climáticas simples (tavg, tmax, tmin, prec, ...) ────────────
+    out_file <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", var, "_mean_r.tif"))
 
     if (skip_existing && file.exists(out_file)) {
       log_msg(paste("[skip]", basename(out_file)))
@@ -239,7 +253,7 @@ for (var in variables) {
       next
     }
 
-    log_msg(paste("[✓]", var, "baixado:", nlyr(climate_data), "camada(s)"))
+    log_msg(paste("[✓]", var, "baixado:", terra::nlyr(climate_data), "camada(s)"))
     log_msg(paste("[→] Recortando e reprojetando", var, "..."))
 
     r_proc <- tryCatch(
@@ -251,10 +265,10 @@ for (var in variables) {
     )
     if (is.null(r_proc)) { failed_vars <- c(failed_vars, var); next }
 
-    # Múltiplas camadas (ex: 12 meses) → média
+    # Múltiplas camadas (ex: 12 meses) → média (na.rm=TRUE descarta nodata)
     r_out <- if (terra::nlyr(r_proc) > 1) {
-      log_msg(paste("[→]", var, "tem", nlyr(r_proc), "camadas — calculando média mensal"))
-      terra::app(r_proc, mean)
+      log_msg(paste("[→]", var, "tem", terra::nlyr(r_proc), "camadas — calculando média mensal"))
+      terra::app(r_proc, mean, na.rm = TRUE)
     } else {
       r_proc
     }
@@ -263,8 +277,10 @@ for (var in variables) {
       terra::writeRaster(r_out, filename = out_file, overwrite = TRUE)
       log_msg(paste("[✓] Salvo:", basename(out_file),
                     "| dimensões:", nrow(r_out), "x", ncol(r_out),
-                    "| valores: [", round(global(r_out, "min", na.rm=TRUE)[[1]], 2),
-                    ";", round(global(r_out, "max", na.rm=TRUE)[[1]], 2), "]"))
+                    "| valores: [",
+                    round(terra::global(r_out, "min", na.rm = TRUE)[[1]], 2),
+                    ";",
+                    round(terra::global(r_out, "max", na.rm = TRUE)[[1]], 2), "]"))
       generated_files <- c(generated_files, out_file)
     }, error = function(e) {
       log_msg(paste("[!] Erro ao salvar", var, ":", e$message))

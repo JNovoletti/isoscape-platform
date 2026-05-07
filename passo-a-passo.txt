@@ -1,3 +1,5 @@
+
+
 CREATE DATABASE isoscape_db CHARACTER SET utf8mb4;
 CREATE USER 'isoscape_user'@'%' IDENTIFIED BY 'isoscape_pass';
 GRANT ALL PRIVILEGES ON isoscape_db.* TO 'isoscape_user'@'%';
