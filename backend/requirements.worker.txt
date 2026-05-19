@@ -9,6 +9,7 @@ rasterio
 rioxarray>=0.15
 xarray>=2024.1
 shapely
+quantile-forest
 netcdf4>=1.6
 
 # ── Machine Learning ───────────────────────────────────
