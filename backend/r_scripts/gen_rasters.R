@@ -1,8 +1,17 @@
 #!/usr/bin/env Rscript
 # =============================================================================
 # gen_rasters.R
+# Equivalente backend do 01_worldclim.R do curso.
 # Baixa dados do WorldClim, recorta pelo shapefile e salva os .tif.
 # Chamado pelo worker Celery antes de run_isoscape.R.
+#
+# Cache compartilhado com gen_rasters.py:
+#   {worldclim_dir}/climate/wc2.1_{res}m/wc2.1_{res}m_{var}_{NN}.tif
+# (mesma estrutura do geodata, portanto Python e R reaproveitam downloads)
+#
+# Sufixo "_r" no nome do arquivo de saída diferencia da versão Python ("_py"):
+#   {prefix}_{res}arc_{var}_mean_r.tif      ← R
+#   {prefix}_{res}arc_{var}_mean_py.tif     ← Python
 #
 # Uso:
 #   Rscript gen_rasters.R \
@@ -73,6 +82,7 @@ log_msg(paste("[→] Resolução:", resolution, "arc-min"))
 log_msg(paste("[→] Skip existing:", skip_existing))
 log_msg(paste("[→] WorldClim cache dir:", worldclim_dir))
 log_msg(paste("[→] Output dir:", output_dir))
+log_msg("[→] Engine: R (gera arquivos com sufixo '_r')")
 
 # ── Diagnóstico de permissões ──────────────────────────────────────────────────
 log_msg("[→] Verificando permissões de diretórios...")
@@ -119,10 +129,15 @@ if (is.null(area)) quit(status = 1)
 log_msg(paste("[✓] Shapefile carregado:", basename(shp_path)))
 log_msg(paste("[→] Extensão da área:", paste(round(as.vector(ext(area)), 4), collapse = " ")))
 log_msg(paste("[→] CRS do shapefile:", crs(area, describe = TRUE)$code))
+log_msg(paste("[→] Área (km²):", round(sum(terra::expanse(area, unit = "km")), 2)))
 
 # ── Garantir que o geodata use o cache dir correto ─────────────────────────────
+# O geodata salva em: {worldclim_dir}/climate/wc2.1_{res}m/
+# Python usa exatamente o mesmo caminho — downloads são compartilhados.
 options(geodata_path = worldclim_dir)
 log_msg(paste("[→] geodata_path setado para:", worldclim_dir))
+log_msg(paste("[→] Cache geodata esperado em:",
+              file.path(worldclim_dir, "climate", paste0("wc2.1_", resolution, "m"))))
 
 # ── Prefixo para nomear os arquivos de saída ───────────────────────────────────
 prefix  <- gsub("[^A-Za-z0-9_]", "_", tools::file_path_sans_ext(basename(shp_path)))
@@ -140,8 +155,7 @@ failed_vars     <- character(0)
 #   r_masked    <- mask(r_crop, area_reproj)
 #   project(r_masked, target_crs)
 #
-# O na.rm=TRUE em terra::app garante que nodata não contamina a média
-# (terra trata valores NA internamente de forma segura — sem lixo de borda).
+# Espelha exatamente o fluxo do 01_worldclim.R do curso.
 process_raster <- function(r, area_vect, target_crs = "EPSG:4674") {
   area_reproj <- tryCatch(
     terra::project(area_vect, terra::crs(r)),
@@ -168,7 +182,7 @@ for (var in variables) {
     }
 
     log_msg("[→] Baixando: bio (WorldClim bioclim)")
-    log_msg(paste("[→] Aguardando resposta do WorldClim... (pode levar minutos)"))
+    log_msg("[→] Aguardando resposta do WorldClim... (pode levar minutos)")
 
     bio_data <- tryCatch({
       geodata::worldclim_global(var = "bio", res = resolution, path = worldclim_dir)
@@ -228,7 +242,7 @@ for (var in variables) {
     }
 
   } else {
-    # ── Variáveis climáticas simples (tavg, tmax, tmin, prec, ...) ────────────
+    # ── Variáveis climáticas simples (tavg, tmax, tmin, prec, srad, vapr, wind, elev) ────
     out_file <- file.path(output_dir, paste0(prefix, "_", res_tag, "_", var, "_mean_r.tif"))
 
     if (skip_existing && file.exists(out_file)) {
@@ -240,8 +254,13 @@ for (var in variables) {
     log_msg(paste("[→] Baixando:", var, "(res =", resolution, "arc-min)"))
     log_msg("[→] Aguardando resposta do WorldClim... (pode levar minutos)")
 
+    # elev é tratado pelo elevation_global, não worldclim_global
     climate_data <- tryCatch({
-      geodata::worldclim_global(var = var, res = resolution, path = worldclim_dir)
+      if (var == "elev") {
+        geodata::elevation_global(res = resolution, path = worldclim_dir)
+      } else {
+        geodata::worldclim_global(var = var, res = resolution, path = worldclim_dir)
+      }
     }, error = function(e) {
       log_msg(paste("[!] ERRO ao baixar", var, ":", e$message))
       NULL
@@ -266,8 +285,9 @@ for (var in variables) {
     if (is.null(r_proc)) { failed_vars <- c(failed_vars, var); next }
 
     # Múltiplas camadas (ex: 12 meses) → média (na.rm=TRUE descarta nodata)
+    # Espelha terra::app(climate_amz_sirgas, mean) do 01_worldclim.R
     r_out <- if (terra::nlyr(r_proc) > 1) {
-      log_msg(paste("[→]", var, "tem", terra::nlyr(r_proc), "camadas — calculando média mensal"))
+      log_msg(paste("[→]", var, "tem", terra::nlyr(r_proc), "camadas — calculando média anual"))
       terra::app(r_proc, mean, na.rm = TRUE)
     } else {
       r_proc
@@ -297,6 +317,7 @@ log_msg(paste("[→] Resumo: gerados =", length(generated_files),
 # ── Salvar metrics.json ────────────────────────────────────────────────────────
 metrics <- list(
   job_id          = job_id,
+  engine          = "r",
   generated_files = generated_files,
   skipped_files   = skipped_files,
   failed_vars     = failed_vars,

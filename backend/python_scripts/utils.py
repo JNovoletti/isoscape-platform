@@ -1,7 +1,7 @@
 """
 backend/python_scripts/utils.py
 
-Utilitários compartilhados para gen_rasters.py e run_isoscape.py.
+Utilitários compartilhados para gen_rasters.py, run_isoscape.py e run_assign.py.
 """
 
 import json
@@ -103,6 +103,7 @@ def load_dataset(
 
     O GeoDataFrame sempre tem colunas 'latitude', 'longitude', 'response'
     (renomeadas a partir de lat_col / lon_col / response_col).
+    Linhas com NA na resposta são removidas (espelha o tratamento do R).
     """
     path = Path(dataset_path)
     if not path.exists():
@@ -132,6 +133,9 @@ def load_dataset(
     # Converter para numérico
     for col in ("latitude", "longitude", "response"):
         df_sel[col] = pd.to_numeric(df_sel[col], errors="coerce")
+
+    # Remover NA na resposta (espelha o R: d13.amz <- amz_var_clim[!is.na(d13C_wood), ])
+    df_sel = df_sel[df_sel["response"].notna()].reset_index(drop=True)
 
     gdf = gpd.GeoDataFrame(
         df_sel,

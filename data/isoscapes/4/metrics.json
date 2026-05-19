@@ -1,5 +1,0 @@
-{
-  "job_id": "4",
-  "timestamp": "2026-05-05T16:08:53.167815",
-  "error": "boolean index did not match indexed array along axis 0; size of axis is 27020 but size of corresponding boolean axis is 140"
-}
