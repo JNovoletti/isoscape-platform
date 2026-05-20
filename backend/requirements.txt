@@ -22,7 +22,7 @@ xarray>=2024.1
 shapely
 
 # ── Dados climáticos ───────────────────────────────────
-earthpy>=0.10
+earthpy>=0.9.4
 xarray>=2024.1
 netcdf4>=1.6
 
