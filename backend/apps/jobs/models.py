@@ -10,8 +10,10 @@ class Job(models.Model):
         FAILED = "failed", "Falhou"
  
     class JobType(models.TextChoices):
-        GEN_RASTERS = "gen_rasters", "Geração de Rasters"
-        RUN_ISOSCAPE = "run_isoscape", "Geração de Isoscape"
+        PREPARE_DATASET = "prepare_dataset", "Pré-processamento de Dataset"
+        GEN_RASTERS     = "gen_rasters",     "Geração de Rasters"
+        RUN_ISOSCAPE    = "run_isoscape",    "Geração de Isoscape"
+        RUN_ASSIGN      = "run_assign",      "Atribuição de Origem"
  
     project = models.ForeignKey(
         "projects.Project",
@@ -56,4 +58,3 @@ class Job(models.Model):
  
     def __str__(self):
         return f"Job {self.id} — {self.get_job_type_display()} [{self.status}]"
- 
