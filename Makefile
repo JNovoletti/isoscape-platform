@@ -75,6 +75,10 @@ rebuild:
 	$(COMPOSE) build --no-cache
 	$(COMPOSE) up -d
 
+rebuild-back:
+	$(COMPOSE) build --no-cache $(BACKEND)
+	$(COMPOSE) up -d $(BACKEND)
+
 logs:
 	$(COMPOSE) logs -f
 
